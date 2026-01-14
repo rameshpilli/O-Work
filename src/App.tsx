@@ -34,6 +34,7 @@ import {
   Package,
   Play,
   Plus,
+  RefreshCcw,
   Settings,
   Shield,
   Smartphone,
@@ -44,6 +45,7 @@ import {
 } from "lucide-solid";
 
 import Button from "./components/Button";
+import OpenWorkLogo from "./components/OpenWorkLogo";
 import PartView from "./components/PartView";
 import TextInput from "./components/TextInput";
 import { createClient, unwrap, waitForHealthy } from "./lib/opencode";
@@ -210,6 +212,53 @@ function isTauriRuntime() {
   return typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__ != null;
 }
 
+function readModePreference(): Mode | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const pref =
+      window.localStorage.getItem("openwork.modePref") ??
+      window.localStorage.getItem("openwork_mode_pref");
+
+    if (pref === "host" || pref === "client") {
+      // Migrate legacy key if needed.
+      try {
+        window.localStorage.setItem("openwork.modePref", pref);
+      } catch {
+        // ignore
+      }
+      return pref;
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+function writeModePreference(nextMode: Mode) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem("openwork.modePref", nextMode);
+    // Keep legacy key for now.
+    window.localStorage.setItem("openwork_mode_pref", nextMode);
+  } catch {
+    // ignore
+  }
+}
+
+function clearModePreference() {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.removeItem("openwork.modePref");
+    window.localStorage.removeItem("openwork_mode_pref");
+  } catch {
+    // ignore
+  }
+}
+
 function safeStringify(value: unknown) {
   const seen = new WeakSet<object>();
 
@@ -361,6 +410,7 @@ export default function App() {
   const [view, setView] = createSignal<View>("onboarding");
   const [mode, setMode] = createSignal<Mode | null>(null);
   const [onboardingStep, setOnboardingStep] = createSignal<OnboardingStep>("mode");
+  const [rememberModeChoice, setRememberModeChoice] = createSignal(false);
   const [tab, setTab] = createSignal<DashboardTab>("home");
 
   const [engine, setEngine] = createSignal<EngineInfo | null>(null);
@@ -1105,6 +1155,11 @@ export default function App() {
   }
 
   onMount(async () => {
+    const modePref = readModePreference();
+    if (modePref) {
+      setRememberModeChoice(true);
+    }
+
     if (typeof window !== "undefined") {
       try {
         const storedBaseUrl = window.localStorage.getItem("openwork.baseUrl");
@@ -1147,6 +1202,57 @@ export default function App() {
     const info = engine();
     if (info?.baseUrl) {
       setBaseUrl(info.baseUrl);
+    }
+
+    // Auto-continue based on saved preference.
+    if (!modePref) return;
+
+    if (modePref === "host") {
+      setMode("host");
+
+      if (info?.running && info.baseUrl) {
+        setOnboardingStep("connecting");
+        const ok = await connectToServer(info.baseUrl, info.projectDir ?? undefined);
+        if (!ok) {
+          setMode(null);
+          setOnboardingStep("mode");
+        }
+        return;
+      }
+
+      if (isTauriRuntime() && projectDir().trim()) {
+        if (!authorizedDirs().length && projectDir().trim()) {
+          setAuthorizedDirs([projectDir().trim()]);
+        }
+
+        setOnboardingStep("connecting");
+        const ok = await startHost();
+        if (!ok) {
+          setOnboardingStep("host");
+        }
+        return;
+      }
+
+      // Missing required info; take them directly to Host setup.
+      setOnboardingStep("host");
+      return;
+    }
+
+    // Client preference.
+    setMode("client");
+    if (!baseUrl().trim()) {
+      setOnboardingStep("client");
+      return;
+    }
+
+    setOnboardingStep("connecting");
+    const ok = await connectToServer(
+      baseUrl().trim(),
+      clientDirectory().trim() ? clientDirectory().trim() : undefined,
+    );
+
+    if (!ok) {
+      setOnboardingStep("client");
     }
   });
 
@@ -1365,6 +1471,19 @@ export default function App() {
     return seconds > 0 ? `${busyLabel()} · ${seconds}s` : busyLabel();
   });
 
+  const localHostLabel = createMemo(() => {
+    const info = engine();
+    if (info?.hostname && info?.port) {
+      return `${info.hostname}:${info.port}`;
+    }
+
+    try {
+      return new URL(baseUrl()).host;
+    } catch {
+      return "localhost:4096";
+    }
+  });
+
   function OnboardingView() {
     return (
       <Switch>
@@ -1374,18 +1493,17 @@ export default function App() {
             <div class="z-10 flex flex-col items-center gap-6">
               <div class="relative">
                 <div class="w-16 h-16 rounded-full border-2 border-zinc-800 flex items-center justify-center animate-spin-slow">
-                  <div class="w-12 h-12 rounded-full border-2 border-t-white border-zinc-800 animate-spin" />
-                </div>
-                <div class="absolute inset-0 flex items-center justify-center">
-                  <Zap size={20} class="text-white" />
+                  <div class="w-12 h-12 rounded-full border-2 border-t-white border-zinc-800 animate-spin flex items-center justify-center bg-black">
+                    <OpenWorkLogo size={20} class="text-white" />
+                  </div>
                 </div>
               </div>
               <div class="text-center">
                 <h2 class="text-xl font-medium mb-2">
-                  {mode() === "host" ? "Starting OpenCode Engine..." : "Connecting..."}
+                  {mode() === "host" ? "Starting OpenCode Engine..." : "Searching for Host..."}
                 </h2>
                 <p class="text-zinc-500 text-sm">
-                  {mode() === "host" ? "Initializing localhost server" : "Verifying handshake"}
+                  {mode() === "host" ? `Initializing ${localHostLabel()}` : "Verifying secure handshake"}
                 </p>
               </div>
             </div>
@@ -1646,87 +1764,119 @@ export default function App() {
           <div class="min-h-screen flex flex-col items-center justify-center bg-black text-white p-6 relative">
             <div class="absolute top-0 left-0 w-full h-96 bg-gradient-to-b from-zinc-900 to-transparent opacity-20 pointer-events-none" />
 
-            <div class="max-w-2xl w-full z-10 space-y-12">
+            <div class="max-w-xl w-full z-10 space-y-12">
               <div class="text-center space-y-4">
                 <div class="flex items-center justify-center gap-3 mb-6">
-                  <div class="w-10 h-10 bg-white rounded-xl flex items-center justify-center">
-                    <Command class="text-black" />
+                  <div class="w-12 h-12 bg-white rounded-xl flex items-center justify-center">
+                    <OpenWorkLogo size={24} class="text-black" />
                   </div>
                   <h1 class="text-3xl font-bold tracking-tight">OpenWork</h1>
                 </div>
-                <h2 class="text-xl text-zinc-400 font-light">
-                  How would you like to run OpenWork today?
-                </h2>
-                <div class="text-xs text-zinc-600">{headerStatus()}</div>
+                <h2 class="text-xl text-zinc-400 font-light">How would you like to run OpenWork today?</h2>
               </div>
 
-              <div class="grid md:grid-cols-2 gap-4">
+              <div class="space-y-4">
                 <button
                   onClick={() => {
+                    if (rememberModeChoice()) {
+                      writeModePreference("host");
+                    }
                     setMode("host");
                     setOnboardingStep("host");
                   }}
-                  class="group relative bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 p-8 rounded-3xl text-left transition-all duration-300 hover:-translate-y-1"
+                  class="group w-full relative bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 p-6 md:p-8 rounded-3xl text-left transition-all duration-300 hover:shadow-2xl hover:shadow-indigo-500/10 hover:-translate-y-0.5 flex items-start gap-6"
                 >
-                  <div class="mb-6 w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 flex items-center justify-center border border-indigo-500/20 group-hover:border-indigo-500/40 transition-colors">
-                    <HardDrive class="text-indigo-400" />
+                  <div class="shrink-0 w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 flex items-center justify-center border border-indigo-500/20 group-hover:border-indigo-500/40 transition-colors">
+                    <HardDrive class="text-indigo-400 w-7 h-7" />
                   </div>
-                  <h3 class="text-lg font-medium text-white mb-2">Host Mode</h3>
-                  <p class="text-zinc-500 text-sm leading-relaxed">
-                    Run the OpenCode engine locally on this machine.
-                  </p>
-                  <div class="mt-6 flex items-center gap-2 text-xs font-mono text-zinc-600">
-                    <div class="w-2 h-2 rounded-full bg-green-500" />
-                    127.0.0.1
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => {
-                    setMode("client");
-                    setOnboardingStep("client");
-                  }}
-                  class="group relative bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 p-8 rounded-3xl text-left transition-all duration-300 hover:-translate-y-1"
-                >
-                  <div class="mb-6 w-12 h-12 rounded-2xl bg-gradient-to-br from-emerald-500/20 to-teal-500/20 flex items-center justify-center border border-emerald-500/20 group-hover:border-emerald-500/40 transition-colors">
-                    <Smartphone class="text-emerald-400" />
-                  </div>
-                  <h3 class="text-lg font-medium text-white mb-2">Client Mode</h3>
-                  <p class="text-zinc-500 text-sm leading-relaxed">
-                    Connect to an existing OpenCode instance.
-                  </p>
-                  <div class="mt-6 flex items-center gap-2 text-xs font-mono text-zinc-600">
-                    <div class="w-2 h-2 rounded-full bg-zinc-600" />
-                    Remote pairing
-                  </div>
-                </button>
-              </div>
-
-              <Show when={engine()?.running && engine()?.baseUrl}>
-                <div class="rounded-2xl bg-zinc-900/40 border border-zinc-800 p-5 flex items-center justify-between">
                   <div>
-                    <div class="text-sm text-white font-medium">Engine already running</div>
-                    <div class="text-xs text-zinc-500 font-mono">{engine()?.baseUrl}</div>
+                    <h3 class="text-xl font-medium text-white mb-2">Start Host Engine</h3>
+                    <p class="text-zinc-500 text-sm leading-relaxed mb-4">
+                      Run OpenCode locally. Best for your primary computer.
+                    </p>
+                    <div class="flex items-center gap-2 text-xs font-mono text-indigo-400/80 bg-indigo-900/10 w-fit px-2 py-1 rounded border border-indigo-500/10">
+                      <div class="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                      {localHostLabel()}
+                    </div>
                   </div>
-                  <Button
-                    variant="secondary"
-                    onClick={async () => {
-                      setMode("host");
-                      setOnboardingStep("connecting");
-                      const ok = await connectToServer(
-                        engine()!.baseUrl!,
-                        engine()!.projectDir ?? undefined,
-                      );
-                      if (!ok) {
-                        setOnboardingStep("mode");
-                      }
-                    }}
-                    disabled={busy()}
+                  <div class="absolute top-8 right-8 text-zinc-700 group-hover:text-zinc-500 transition-colors">
+                    <ArrowRight size={24} />
+                  </div>
+                </button>
+
+                <Show when={engine()?.running && engine()?.baseUrl}>
+                  <div class="rounded-2xl bg-zinc-900/40 border border-zinc-800 p-5 flex items-center justify-between">
+                    <div>
+                      <div class="text-sm text-white font-medium">Engine already running</div>
+                      <div class="text-xs text-zinc-500 font-mono truncate max-w-[14rem] md:max-w-[22rem]">
+                        {engine()?.baseUrl}
+                      </div>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      onClick={async () => {
+                        setMode("host");
+                        setOnboardingStep("connecting");
+                        const ok = await connectToServer(
+                          engine()!.baseUrl!,
+                          engine()!.projectDir ?? undefined,
+                        );
+                        if (!ok) {
+                          setMode(null);
+                          setOnboardingStep("mode");
+                        }
+                      }}
+                      disabled={busy()}
+                    >
+                      Attach
+                    </Button>
+                  </div>
+                </Show>
+
+                <div class="flex items-center gap-2 px-2 py-1">
+                  <button
+                    onClick={() => setRememberModeChoice((v) => !v)}
+                    class="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors group"
                   >
-                    Attach
-                  </Button>
+                    <div
+                      class={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+                        rememberModeChoice()
+                          ? "bg-indigo-500 border-indigo-500 text-black"
+                          : "border-zinc-700 bg-transparent group-hover:border-zinc-500"
+                      }`}
+                    >
+                      <Show when={rememberModeChoice()}>
+                        <CheckCircle2 size={10} />
+                      </Show>
+                    </div>
+                    Remember my choice for next time
+                  </button>
                 </div>
-              </Show>
+
+                <div class="pt-6 border-t border-zinc-900 flex justify-center">
+                  <button
+                    onClick={() => {
+                      if (rememberModeChoice()) {
+                        writeModePreference("client");
+                      }
+                      setMode("client");
+                      setOnboardingStep("client");
+                    }}
+                    class="text-zinc-600 hover:text-zinc-400 text-sm font-medium transition-colors flex items-center gap-2 px-4 py-2 rounded-lg hover:bg-zinc-900/50"
+                  >
+                    <Smartphone size={16} />
+                    Or connect as a Client (Remote Pairing)
+                  </button>
+                </div>
+
+                <Show when={error()}>
+                  <div class="rounded-2xl bg-red-950/40 px-5 py-4 text-sm text-red-200 border border-red-500/20">
+                    {error()}
+                  </div>
+                </Show>
+
+                <div class="text-center text-xs text-zinc-700">{headerStatus()}</div>
+              </div>
             </div>
           </div>
         </Match>
@@ -2358,6 +2508,45 @@ export default function App() {
               </div>
             </div>
 
+            <div class="bg-zinc-900/30 border border-zinc-800/50 rounded-2xl p-5 space-y-3">
+              <div class="text-sm font-medium text-white">Startup</div>
+
+              <div class="flex items-center justify-between bg-zinc-950 p-3 rounded-xl border border-zinc-800">
+                <div class="flex items-center gap-3">
+                  <div
+                    class={`p-2 rounded-lg ${
+                      mode() === "host"
+                        ? "bg-indigo-500/10 text-indigo-400"
+                        : "bg-emerald-500/10 text-emerald-400"
+                    }`}
+                  >
+                    <Show when={mode() === "host"} fallback={<Smartphone size={18} />}>
+                      <HardDrive size={18} />
+                    </Show>
+                  </div>
+                  <span class="capitalize text-sm font-medium text-white">{mode()} mode</span>
+                </div>
+                <Button variant="outline" class="text-xs h-8 py-0 px-3" onClick={stopHost} disabled={busy()}>
+                  Switch
+                </Button>
+              </div>
+
+              <Button
+                variant="secondary"
+                class="w-full justify-between group"
+                onClick={() => {
+                  clearModePreference();
+                }}
+              >
+                <span class="text-zinc-300">Reset default startup mode</span>
+                <RefreshCcw size={14} class="text-zinc-500 group-hover:rotate-180 transition-transform" />
+              </Button>
+
+              <p class="text-xs text-zinc-600">
+                This clears your saved preference and shows mode selection on next launch.
+              </p>
+            </div>
+
             <Show when={developerMode()}>
               <section>
                 <h3 class="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">Developer</h3>
@@ -2389,7 +2578,7 @@ export default function App() {
           <div>
             <div class="flex items-center gap-3 mb-10 px-2">
               <div class="w-8 h-8 bg-white rounded-lg flex items-center justify-center">
-                <Command size={18} class="text-black" />
+                <OpenWorkLogo size={18} class="text-black" />
               </div>
               <span class="font-bold text-lg tracking-tight">OpenWork</span>
             </div>
