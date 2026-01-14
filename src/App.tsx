@@ -10,6 +10,8 @@ import {
   onMount,
 } from "solid-js";
 
+import { applyEdits, modify, parse } from "jsonc-parser";
+
 import type {
   Message,
   Part,
@@ -52,7 +54,10 @@ import {
   importSkill,
   opkgInstall,
   pickDirectory,
+  readOpencodeConfig,
+  writeOpencodeConfig,
   type EngineInfo,
+  type OpencodeConfigFile,
 } from "./lib/tauri";
 
 type Client = ReturnType<typeof createClient>;
@@ -73,7 +78,7 @@ type Mode = "host" | "client";
 
 type OnboardingStep = "mode" | "host" | "client" | "connecting";
 
-type DashboardTab = "home" | "sessions" | "templates" | "skills" | "settings";
+type DashboardTab = "home" | "sessions" | "templates" | "skills" | "plugins" | "settings";
 
 type Template = {
   id: string;
@@ -89,9 +94,117 @@ type SkillCard = {
   description?: string;
 };
 
+type CuratedPackage = {
+  name: string;
+  source: string;
+  description: string;
+  tags: string[];
+  installable: boolean;
+};
+
+type PluginInstallStep = {
+  title: string;
+  description: string;
+  command?: string;
+  url?: string;
+  path?: string;
+  note?: string;
+};
+
+type SuggestedPlugin = {
+  name: string;
+  packageName: string;
+  description: string;
+  tags: string[];
+  aliases?: string[];
+  installMode?: "simple" | "guided";
+  steps?: PluginInstallStep[];
+};
+
+type PluginScope = "project" | "global";
+
 type PendingPermission = ApiPermissionRequest & {
   receivedAt: number;
 };
+
+const CURATED_PACKAGES: CuratedPackage[] = [
+  {
+    name: "OpenPackage Essentials",
+    source: "essentials",
+    description: "Starter rules, commands, and skills from the OpenPackage registry.",
+    tags: ["registry", "starter"],
+    installable: true,
+  },
+  {
+    name: "Claude Code Plugins",
+    source: "github:anthropics/claude-code",
+    description: "Official Claude Code plugin pack from GitHub.",
+    tags: ["github", "claude"],
+    installable: true,
+  },
+  {
+    name: "Claude Code Commit Commands",
+    source: "github:anthropics/claude-code#subdirectory=plugins/commit-commands",
+    description: "Commit message helper commands (Claude Code plugin).",
+    tags: ["github", "workflow"],
+    installable: true,
+  },
+  {
+    name: "Awesome OpenPackage",
+    source: "git:https://github.com/enulus/awesome-openpackage.git",
+    description: "Community collection of OpenPackage examples and templates.",
+    tags: ["community"],
+    installable: true,
+  },
+  {
+    name: "Awesome Claude Skills",
+    source: "https://github.com/ComposioHQ/awesome-claude-skills",
+    description: "Curated list of Claude skills and prompts (not an OpenPackage yet).",
+    tags: ["community", "list"],
+    installable: false,
+  },
+];
+
+const SUGGESTED_PLUGINS: SuggestedPlugin[] = [
+  {
+    name: "opencode-scheduler",
+    packageName: "opencode-scheduler",
+    description: "Run scheduled jobs with the OpenCode scheduler plugin.",
+    tags: ["automation", "jobs"],
+    installMode: "simple",
+  },
+  {
+    name: "opencode-browser",
+    packageName: "@different-ai/opencode-browser",
+    description: "Browser automation with a local extension + native host.",
+    tags: ["browser", "extension"],
+    aliases: ["opencode-browser"],
+    installMode: "guided",
+    steps: [
+      {
+        title: "Run the installer",
+        description: "Installs the extension + native host and prepares the local broker.",
+        command: "bunx @different-ai/opencode-browser@latest install",
+        note: "Use npx @different-ai/opencode-browser@latest install if you do not have bunx.",
+      },
+      {
+        title: "Load the extension",
+        description:
+          "Open chrome://extensions, enable Developer mode, click Load unpacked, and select the extension folder.",
+        url: "chrome://extensions",
+        path: "~/.opencode-browser/extension",
+      },
+      {
+        title: "Pin the extension",
+        description: "Pin OpenCode Browser Automation in your browser toolbar.",
+      },
+      {
+        title: "Add plugin to config",
+        description: "Click Add to write @different-ai/opencode-browser into opencode.json.",
+      },
+    ],
+  },
+];
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__ != null;
@@ -285,6 +398,14 @@ export default function App() {
   const [skills, setSkills] = createSignal<SkillCard[]>([]);
   const [skillsStatus, setSkillsStatus] = createSignal<string | null>(null);
   const [openPackageSource, setOpenPackageSource] = createSignal("");
+  const [packageSearch, setPackageSearch] = createSignal("");
+
+  const [pluginScope, setPluginScope] = createSignal<PluginScope>("project");
+  const [pluginConfig, setPluginConfig] = createSignal<OpencodeConfigFile | null>(null);
+  const [pluginList, setPluginList] = createSignal<string[]>([]);
+  const [pluginInput, setPluginInput] = createSignal("");
+  const [pluginStatus, setPluginStatus] = createSignal<string | null>(null);
+  const [activePluginGuide, setActivePluginGuide] = createSignal<string | null>(null);
 
   const [events, setEvents] = createSignal<OpencodeEvent[]>([]);
   const [developerMode, setDeveloperMode] = createSignal(false);
@@ -312,6 +433,57 @@ export default function App() {
 
     return busy();
   });
+
+  const filteredPackages = createMemo(() => {
+    const query = packageSearch().trim().toLowerCase();
+    if (!query) return CURATED_PACKAGES;
+
+    return CURATED_PACKAGES.filter((pkg) => {
+      const haystack = [pkg.name, pkg.source, pkg.description, pkg.tags.join(" ")]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  });
+
+  const normalizePluginList = (value: unknown) => {
+    if (!value) return [] as string[];
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+        .filter((entry) => entry.length > 0);
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed ? [trimmed] : [];
+    }
+    return [] as string[];
+  };
+
+  const pluginNamesLower = createMemo(() =>
+    new Set(pluginList().map((entry) => entry.toLowerCase())),
+  );
+
+  const isPluginInstalled = (pluginName: string, aliases: string[] = []) => {
+    const list = pluginNamesLower();
+    return [pluginName, ...aliases].some((entry) => list.has(entry.toLowerCase()));
+  };
+
+  const loadPluginsFromConfig = (config: OpencodeConfigFile | null) => {
+    if (!config?.content) {
+      setPluginList([]);
+      return;
+    }
+
+    try {
+      const parsed = parse(config.content) as Record<string, unknown> | undefined;
+      const next = normalizePluginList(parsed?.plugin);
+      setPluginList(next);
+    } catch (e) {
+      setPluginList([]);
+      setPluginStatus(e instanceof Error ? e.message : "Failed to parse opencode.json");
+    }
+  };
 
   const selectedSession = createMemo(() => {
     const id = selectedSessionId();
@@ -675,14 +847,115 @@ export default function App() {
     }
   }
 
-  async function installFromOpenPackage() {
+  async function refreshPlugins(scopeOverride?: PluginScope) {
+    if (!isTauriRuntime()) {
+      setPluginStatus("Plugin management is only available in Host mode.");
+      setPluginList([]);
+      return;
+    }
+
+    const scope = scopeOverride ?? pluginScope();
+    const targetDir = projectDir().trim();
+
+    if (scope === "project" && !targetDir) {
+      setPluginStatus("Pick a project folder to manage project plugins.");
+      setPluginList([]);
+      return;
+    }
+
+    try {
+      setPluginStatus(null);
+      const config = await readOpencodeConfig(scope, targetDir);
+      setPluginConfig(config);
+
+      if (!config.exists) {
+        setPluginList([]);
+        setPluginStatus("No opencode.json found yet. Add a plugin to create one.");
+        return;
+      }
+
+      loadPluginsFromConfig(config);
+    } catch (e) {
+      setPluginConfig(null);
+      setPluginList([]);
+      setPluginStatus(e instanceof Error ? e.message : "Failed to load opencode.json");
+    }
+  }
+
+  async function addPlugin(pluginNameOverride?: string) {
+    if (!isTauriRuntime()) {
+      setPluginStatus("Plugin management is only available in Host mode.");
+      return;
+    }
+
+    const pluginName = (pluginNameOverride ?? pluginInput()).trim();
+    const isManualInput = pluginNameOverride == null;
+
+    if (!pluginName) {
+      if (isManualInput) {
+        setPluginStatus("Enter a plugin package name.");
+      }
+      return;
+    }
+
+    const scope = pluginScope();
+    const targetDir = projectDir().trim();
+
+    if (scope === "project" && !targetDir) {
+      setPluginStatus("Pick a project folder to manage project plugins.");
+      return;
+    }
+
+    try {
+      setPluginStatus(null);
+      const config = await readOpencodeConfig(scope, targetDir);
+      const raw = config.content ?? "";
+
+      if (!raw.trim()) {
+        const payload = {
+          $schema: "https://opencode.ai/config.json",
+          plugin: [pluginName],
+        };
+        await writeOpencodeConfig(scope, targetDir, `${JSON.stringify(payload, null, 2)}\n`);
+        if (isManualInput) {
+          setPluginInput("");
+        }
+        await refreshPlugins(scope);
+        return;
+      }
+
+      const parsed = parse(raw) as Record<string, unknown> | undefined;
+      const plugins = normalizePluginList(parsed?.plugin);
+
+      if (plugins.some((entry) => entry.toLowerCase() === pluginName.toLowerCase())) {
+        setPluginStatus("Plugin already listed in opencode.json.");
+        return;
+      }
+
+      const next = [...plugins, pluginName];
+      const edits = modify(raw, ["plugin"], next, {
+        formattingOptions: { insertSpaces: true, tabSize: 2 },
+      });
+      const updated = applyEdits(raw, edits);
+
+      await writeOpencodeConfig(scope, targetDir, updated);
+      if (isManualInput) {
+        setPluginInput("");
+      }
+      await refreshPlugins(scope);
+    } catch (e) {
+      setPluginStatus(e instanceof Error ? e.message : "Failed to update opencode.json");
+    }
+  }
+
+  async function installFromOpenPackage(sourceOverride?: string) {
     if (mode() !== "host" || !isTauriRuntime()) {
       setError("OpenPackage installs are only available in Host mode.");
       return;
     }
 
     const targetDir = projectDir().trim();
-    const pkg = openPackageSource().trim();
+    const pkg = (sourceOverride ?? openPackageSource()).trim();
 
     if (!targetDir) {
       setError("Pick a project folder first.");
@@ -694,9 +967,10 @@ export default function App() {
       return;
     }
 
+    setOpenPackageSource(pkg);
     setBusy(true);
     setError(null);
-    setSkillsStatus(null);
+    setSkillsStatus("Installing OpenPackage...");
 
     try {
       const result = await opkgInstall(targetDir, pkg);
@@ -708,10 +982,22 @@ export default function App() {
 
       await refreshSkills();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown error");
+      setError(e instanceof Error ? e.message : safeStringify(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function useCuratedPackage(pkg: CuratedPackage) {
+    if (pkg.installable) {
+      await installFromOpenPackage(pkg.source);
+      return;
+    }
+
+    setOpenPackageSource(pkg.source);
+    setSkillsStatus(
+      "This is a curated list, not an OpenPackage yet. Copy the link or watch the PRD for planned registry search integration.",
+    );
   }
 
   async function importLocalSkill() {
@@ -1425,6 +1711,8 @@ export default function App() {
           return "Templates";
         case "skills":
           return "Skills";
+        case "plugins":
+          return "Plugins";
         case "settings":
           return "Settings";
         default:
@@ -1437,6 +1725,9 @@ export default function App() {
     createEffect(() => {
       if (tab() === "skills") {
         refreshSkills().catch(() => undefined);
+      }
+      if (tab() === "plugins") {
+        refreshPlugins().catch(() => undefined);
       }
     });
 
@@ -1689,7 +1980,7 @@ export default function App() {
                   onInput={(e) => setOpenPackageSource(e.currentTarget.value)}
                 />
                 <Button
-                  onClick={installFromOpenPackage}
+                  onClick={() => installFromOpenPackage()}
                   disabled={busy() || mode() !== "host" || !isTauriRuntime()}
                   class="md:w-auto"
                 >
@@ -1719,6 +2010,69 @@ export default function App() {
                 </div>
               </Show>
             </div>
+
+            <div class="bg-zinc-900/30 border border-zinc-800/50 rounded-2xl p-5 space-y-4">
+              <div class="flex items-center justify-between">
+                <div class="text-sm font-medium text-white">Curated packages</div>
+                <div class="text-xs text-zinc-500">{filteredPackages().length}</div>
+              </div>
+
+              <input
+                class="w-full bg-zinc-900/50 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-600 focus:border-zinc-600 transition-all"
+                placeholder="Search packages or lists (e.g. claude, registry, community)"
+                value={packageSearch()}
+                onInput={(e) => setPackageSearch(e.currentTarget.value)}
+              />
+
+              <Show
+                when={filteredPackages().length}
+                fallback={
+                  <div class="rounded-xl bg-black/20 border border-zinc-800 p-3 text-xs text-zinc-400">
+                    No curated matches. Try a different search.
+                  </div>
+                }
+              >
+                <div class="space-y-3">
+                  <For each={filteredPackages()}>
+                    {(pkg) => (
+                      <div class="rounded-xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                        <div class="flex items-start justify-between gap-4">
+                          <div class="space-y-2">
+                            <div class="text-sm font-medium text-white">{pkg.name}</div>
+                            <div class="text-xs text-zinc-500 font-mono break-all">{pkg.source}</div>
+                            <div class="text-sm text-zinc-500">{pkg.description}</div>
+                            <div class="flex flex-wrap gap-2">
+                              <For each={pkg.tags}>
+                                {(tag) => (
+                                  <span class="text-[10px] uppercase tracking-wide bg-zinc-800/70 text-zinc-400 px-2 py-0.5 rounded-full">
+                                    {tag}
+                                  </span>
+                                )}
+                              </For>
+                            </div>
+                          </div>
+                          <Button
+                            variant={pkg.installable ? "secondary" : "outline"}
+                            onClick={() => useCuratedPackage(pkg)}
+                            disabled={
+                              busy() ||
+                              (pkg.installable && (mode() !== "host" || !isTauriRuntime()))
+                            }
+                          >
+                            {pkg.installable ? "Install" : "View"}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+
+              <div class="text-xs text-zinc-500">
+                Publishing to the OpenPackage registry (`opkg push`) requires authentication today. A registry search + curated list sync is planned.
+              </div>
+            </div>
+
 
             <div>
               <div class="flex items-center justify-between mb-3">
@@ -1751,6 +2105,199 @@ export default function App() {
                   </For>
                 </div>
               </Show>
+            </div>
+          </section>
+        </Match>
+
+        <Match when={tab() === "plugins"}>
+          <section class="space-y-6">
+            <div class="bg-zinc-900/30 border border-zinc-800/50 rounded-2xl p-5 space-y-4">
+              <div class="flex items-start justify-between gap-4">
+                <div class="space-y-1">
+                  <div class="text-sm font-medium text-white">OpenCode plugins</div>
+                  <div class="text-xs text-zinc-500">
+                    Manage `opencode.json` for your project or global OpenCode plugins.
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button
+                    class={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                      pluginScope() === "project"
+                        ? "bg-white/10 text-white border-white/20"
+                        : "text-zinc-500 border-zinc-800 hover:text-white"
+                    }`}
+                    onClick={() => {
+                      setPluginScope("project");
+                      refreshPlugins("project").catch(() => undefined);
+                    }}
+                  >
+                    Project
+                  </button>
+                  <button
+                    class={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                      pluginScope() === "global"
+                        ? "bg-white/10 text-white border-white/20"
+                        : "text-zinc-500 border-zinc-800 hover:text-white"
+                    }`}
+                    onClick={() => {
+                      setPluginScope("global");
+                      refreshPlugins("global").catch(() => undefined);
+                    }}
+                  >
+                    Global
+                  </button>
+                  <Button variant="ghost" onClick={() => refreshPlugins().catch(() => undefined)}>
+                    Refresh
+                  </Button>
+                </div>
+              </div>
+
+              <div class="flex flex-col gap-1 text-xs text-zinc-500">
+                <div>Config</div>
+                <div class="text-zinc-600 font-mono truncate">
+                  {pluginConfig()?.path ?? "Not loaded yet"}
+                </div>
+              </div>
+
+              <div class="space-y-3">
+                <div class="text-xs font-medium text-zinc-400 uppercase tracking-wider">Suggested plugins</div>
+                <div class="grid gap-3">
+                  <For each={SUGGESTED_PLUGINS}>
+                    {(plugin) => {
+                      const isGuided = () => plugin.installMode === "guided";
+                      const isInstalled = () =>
+                        isPluginInstalled(plugin.packageName, plugin.aliases ?? []);
+                      const isGuideOpen = () => activePluginGuide() === plugin.packageName;
+
+                      return (
+                        <div class="rounded-2xl border border-zinc-800/60 bg-zinc-950/40 p-4 space-y-3">
+                          <div class="flex items-start justify-between gap-4">
+                            <div>
+                              <div class="text-sm font-medium text-white font-mono">{plugin.name}</div>
+                              <div class="text-xs text-zinc-500 mt-1">{plugin.description}</div>
+                              <Show when={plugin.packageName !== plugin.name}>
+                                <div class="text-xs text-zinc-600 font-mono mt-1">
+                                  {plugin.packageName}
+                                </div>
+                              </Show>
+                            </div>
+                            <div class="flex items-center gap-2">
+                              <Show when={isGuided()}>
+                                <Button
+                                  variant="ghost"
+                                  onClick={() =>
+                                    setActivePluginGuide(isGuideOpen() ? null : plugin.packageName)
+                                  }
+                                >
+                                  {isGuideOpen() ? "Hide setup" : "Setup"}
+                                </Button>
+                              </Show>
+                              <Button
+                                variant={isInstalled() ? "outline" : "secondary"}
+                                onClick={() => addPlugin(plugin.packageName)}
+                                disabled={
+                                  busy() ||
+                                  isInstalled() ||
+                                  !isTauriRuntime() ||
+                                  (pluginScope() === "project" && !projectDir().trim())
+                                }
+                              >
+                                {isInstalled() ? "Added" : "Add"}
+                              </Button>
+                            </div>
+                          </div>
+                          <div class="flex flex-wrap gap-2">
+                            <For each={plugin.tags}>
+                              {(tag) => (
+                                <span class="text-[10px] uppercase tracking-wide bg-zinc-800/70 text-zinc-400 px-2 py-0.5 rounded-full">
+                                  {tag}
+                                </span>
+                              )}
+                            </For>
+                          </div>
+                          <Show when={isGuided() && isGuideOpen()}>
+                            <div class="rounded-xl border border-zinc-800/70 bg-zinc-950/60 p-4 space-y-3">
+                              <For each={plugin.steps ?? []}>
+                                {(step, idx) => (
+                                  <div class="space-y-1">
+                                    <div class="text-xs font-medium text-zinc-300">
+                                      {idx() + 1}. {step.title}
+                                    </div>
+                                    <div class="text-xs text-zinc-500">{step.description}</div>
+                                    <Show when={step.command}>
+                                      <div class="text-xs font-mono text-zinc-200 bg-zinc-900/60 border border-zinc-800/70 rounded-lg px-3 py-2">
+                                        {step.command}
+                                      </div>
+                                    </Show>
+                                    <Show when={step.note}>
+                                      <div class="text-xs text-zinc-500">{step.note}</div>
+                                    </Show>
+                                    <Show when={step.url}>
+                                      <div class="text-xs text-zinc-500">
+                                        Open: <span class="font-mono text-zinc-400">{step.url}</span>
+                                      </div>
+                                    </Show>
+                                    <Show when={step.path}>
+                                      <div class="text-xs text-zinc-500">
+                                        Path: <span class="font-mono text-zinc-400">{step.path}</span>
+                                      </div>
+                                    </Show>
+                                  </div>
+                                )}
+                              </For>
+                            </div>
+                          </Show>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
+              </div>
+
+              <Show
+                when={pluginList().length}
+                fallback={
+                  <div class="rounded-xl border border-zinc-800/60 bg-zinc-950/40 p-4 text-sm text-zinc-500">
+                    No plugins configured yet.
+                  </div>
+                }
+              >
+                <div class="grid gap-2">
+                  <For each={pluginList()}>
+                    {(pluginName) => (
+                      <div class="flex items-center justify-between rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-4 py-2.5">
+                        <div class="text-sm text-zinc-200 font-mono">{pluginName}</div>
+                        <div class="text-[10px] uppercase tracking-wide text-zinc-500">Enabled</div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+
+              <div class="flex flex-col gap-3">
+                <div class="flex flex-col md:flex-row gap-3">
+                  <div class="flex-1">
+                    <TextInput
+                      label="Add plugin"
+                      placeholder="opencode-wakatime"
+                      value={pluginInput()}
+                      onInput={(e) => setPluginInput(e.currentTarget.value)}
+                      hint="Add npm package names, e.g. opencode-wakatime"
+                    />
+                  </div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => addPlugin()}
+                    disabled={busy() || !pluginInput().trim()}
+                    class="md:mt-6"
+                  >
+                    Add
+                  </Button>
+                </div>
+                <Show when={pluginStatus()}>
+                  <div class="text-xs text-zinc-500">{pluginStatus()}</div>
+                </Show>
+              </div>
             </div>
           </section>
         </Match>
@@ -1820,6 +2367,7 @@ export default function App() {
               {navItem("sessions", "Sessions", <Play size={18} />)}
               {navItem("templates", "Templates", <FileText size={18} />)}
               {navItem("skills", "Skills", <Package size={18} />)}
+              {navItem("plugins", "Plugins", <Cpu size={18} />)}
               {navItem("settings", "Settings", <Settings size={18} />)}
             </nav>
           </div>
@@ -1910,7 +2458,7 @@ export default function App() {
           </Show>
 
           <nav class="md:hidden fixed bottom-0 left-0 right-0 border-t border-zinc-800 bg-zinc-950/90 backdrop-blur-md">
-            <div class="mx-auto max-w-5xl px-4 py-3 grid grid-cols-5 gap-2">
+            <div class="mx-auto max-w-5xl px-4 py-3 grid grid-cols-6 gap-2">
               <button
                 class={`flex flex-col items-center gap-1 text-xs ${
                   tab() === "home" ? "text-white" : "text-zinc-500"
@@ -1946,6 +2494,15 @@ export default function App() {
               >
                 <Package size={18} />
                 Skills
+              </button>
+              <button
+                class={`flex flex-col items-center gap-1 text-xs ${
+                  tab() === "plugins" ? "text-white" : "text-zinc-500"
+                }`}
+                onClick={() => setTab("plugins")}
+              >
+                <Cpu size={18} />
+                Plugins
               </button>
               <button
                 class={`flex flex-col items-center gap-1 text-xs ${

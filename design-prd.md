@@ -18,6 +18,7 @@ OpenWork competes directly with Anthropic’s Cowork conceptually, but stays ope
 - Provide long-running tasks with resumability.
 - Provide explicit, understandable permissions and auditing.
 - Work with **only the folders the user authorizes**.
+- Treat **plugins + skills** as the primary extensibility system.
 
 ## Non-Goals
 
@@ -172,6 +173,28 @@ OpenWork’s settings pages use:
 - `client.config.get()`
 - `client.config.providers()`
 - `client.auth.set()` (optional flow to store keys)
+
+### Extensibility — Skills + Plugins
+
+OpenWork exposes two extension surfaces:
+
+1. **Skills (OpenPackage)**
+   - Installed into `.opencode/skill/*`.
+   - OpenWork can run `opkg install` to pull packages from the registry or GitHub.
+
+2. **Plugins (OpenCode)**
+   - Plugins are configured via `opencode.json` in the workspace.
+   - The format is the same as OpenCode CLI uses today.
+   - OpenWork should show plugin status and instructions; a native plugin manager is planned.
+
+### OpenPackage Registry (Current + Future)
+
+- Today, OpenWork only supports **curated lists + manual sources**.
+- Publishing to the official registry currently requires authentication (`opkg push` + `opkg configure`).
+- Future goals:
+  - in-app registry search
+  - curated list sync (e.g. Awesome Claude Skills)
+  - frictionless publishing without signup (pending registry changes)
 
 
 ## When it comes to design

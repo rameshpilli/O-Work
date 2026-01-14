@@ -102,6 +102,23 @@ If `opkg` is not installed globally, OpenWork falls back to:
 pnpm dlx opkg install <package>
 ```
 
+## OpenCode Plugins
+
+Plugins are the **native** way to extend OpenCode. OpenWork now manages them from the Skills tab by
+reading and writing `opencode.json`.
+
+- **Project scope**: `<workspace>/opencode.json`
+- **Global scope**: `~/.config/opencode/opencode.json` (or `$XDG_CONFIG_HOME/opencode/opencode.json`)
+
+You can still edit `opencode.json` manually; OpenWork uses the same format as the OpenCode CLI:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-wakatime"]
+}
+```
+
 ## Useful Commands
 
 ```bash

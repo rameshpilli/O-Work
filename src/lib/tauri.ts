@@ -57,3 +57,24 @@ export async function importSkill(
     overwrite: options?.overwrite ?? false,
   });
 }
+
+export type OpencodeConfigFile = {
+  path: string;
+  exists: boolean;
+  content: string | null;
+};
+
+export async function readOpencodeConfig(
+  scope: "project" | "global",
+  projectDir: string,
+): Promise<OpencodeConfigFile> {
+  return invoke<OpencodeConfigFile>("read_opencode_config", { scope, projectDir });
+}
+
+export async function writeOpencodeConfig(
+  scope: "project" | "global",
+  projectDir: string,
+  content: string,
+): Promise<ExecResult> {
+  return invoke<ExecResult>("write_opencode_config", { scope, projectDir, content });
+}

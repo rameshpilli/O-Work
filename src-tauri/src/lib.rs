@@ -1,4 +1,5 @@
 use std::{
+  env,
   fs,
   net::TcpListener,
   path::{Path, PathBuf},
@@ -43,25 +44,37 @@ pub struct ExecResult {
   pub stderr: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeConfigFile {
+  pub path: String,
+  pub exists: bool,
+  pub content: Option<String>,
+}
+
 fn find_free_port() -> Result<u16, String> {
   let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
   let port = listener.local_addr().map_err(|e| e.to_string())?.port();
   Ok(port)
 }
 
-fn run_capture(command: &mut Command) -> Result<ExecResult, String> {
-  let output = command
-    .output()
-    .map_err(|e| format!("Failed to run command: {e}"))?;
-
-  let status = output.status.code().unwrap_or(-1);
-
-  Ok(ExecResult {
-    ok: output.status.success(),
-    status,
-    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-  })
+fn run_capture_optional(command: &mut Command) -> Result<Option<ExecResult>, String> {
+  match command.output() {
+    Ok(output) => {
+      let status = output.status.code().unwrap_or(-1);
+      Ok(Some(ExecResult {
+        ok: output.status.success(),
+        status,
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+      }))
+    }
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+    Err(e) => Err(format!(
+      "Failed to run {}: {e}",
+      command.get_program().to_string_lossy()
+    )),
+  }
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
@@ -93,6 +106,29 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
   }
 
   Ok(())
+}
+
+fn resolve_opencode_config_path(scope: &str, project_dir: &str) -> Result<PathBuf, String> {
+  match scope {
+    "project" => {
+      if project_dir.trim().is_empty() {
+        return Err("projectDir is required".to_string());
+      }
+      Ok(PathBuf::from(project_dir).join("opencode.json"))
+    }
+    "global" => {
+      let base = if let Ok(dir) = env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(dir)
+      } else if let Ok(home) = env::var("HOME") {
+        PathBuf::from(home).join(".config")
+      } else {
+        return Err("Unable to resolve config directory".to_string());
+      };
+
+      Ok(base.join("opencode").join("opencode.json"))
+    }
+    _ => Err("scope must be 'project' or 'global'".to_string()),
+  }
 }
 
 impl EngineManager {
@@ -204,8 +240,8 @@ fn opkg_install(project_dir: String, package: String) -> Result<ExecResult, Stri
     return Err("package is required".to_string());
   }
 
-  let mut command = Command::new("opkg");
-  command
+  let mut opkg = Command::new("opkg");
+  opkg
     .arg("install")
     .arg(&package)
     .current_dir(&project_dir)
@@ -213,33 +249,58 @@ fn opkg_install(project_dir: String, package: String) -> Result<ExecResult, Stri
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
-  match command.output() {
-    Ok(output) => {
-      let status = output.status.code().unwrap_or(-1);
-      Ok(ExecResult {
-        ok: output.status.success(),
-        status,
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-      })
-    }
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      // Fallback: use pnpm to download+run opkg on demand.
-      let mut pnpm = Command::new("pnpm");
-      pnpm
-        .arg("dlx")
-        .arg("opkg")
-        .arg("install")
-        .arg(&package)
-        .current_dir(&project_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-      run_capture(&mut pnpm)
-    }
-    Err(e) => Err(format!("Failed to run opkg: {e}")),
+  if let Some(result) = run_capture_optional(&mut opkg)? {
+    return Ok(result);
   }
+
+  let mut openpackage = Command::new("openpackage");
+  openpackage
+    .arg("install")
+    .arg(&package)
+    .current_dir(&project_dir)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+  if let Some(result) = run_capture_optional(&mut openpackage)? {
+    return Ok(result);
+  }
+
+  let mut pnpm = Command::new("pnpm");
+  pnpm
+    .arg("dlx")
+    .arg("opkg")
+    .arg("install")
+    .arg(&package)
+    .current_dir(&project_dir)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+  if let Some(result) = run_capture_optional(&mut pnpm)? {
+    return Ok(result);
+  }
+
+  let mut npx = Command::new("npx");
+  npx
+    .arg("opkg")
+    .arg("install")
+    .arg(&package)
+    .current_dir(&project_dir)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+  if let Some(result) = run_capture_optional(&mut npx)? {
+    return Ok(result);
+  }
+
+  Ok(ExecResult {
+    ok: false,
+    status: -1,
+    stdout: String::new(),
+    stderr: "OpenPackage CLI not found. Install with `npm install -g opkg` (or `openpackage`), or ensure pnpm/npx is available.".to_string(),
+  })
 }
 
 #[tauri::command]
@@ -284,6 +345,48 @@ fn import_skill(project_dir: String, source_dir: String, overwrite: bool) -> Res
   })
 }
 
+#[tauri::command]
+fn read_opencode_config(scope: String, project_dir: String) -> Result<OpencodeConfigFile, String> {
+  let path = resolve_opencode_config_path(scope.trim(), &project_dir)?;
+  let exists = path.exists();
+
+  let content = if exists {
+    Some(fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?)
+  } else {
+    None
+  };
+
+  Ok(OpencodeConfigFile {
+    path: path.to_string_lossy().to_string(),
+    exists,
+    content,
+  })
+}
+
+#[tauri::command]
+fn write_opencode_config(
+  scope: String,
+  project_dir: String,
+  content: String,
+) -> Result<ExecResult, String> {
+  let path = resolve_opencode_config_path(scope.trim(), &project_dir)?;
+
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent)
+      .map_err(|e| format!("Failed to create config dir {}: {e}", parent.display()))?;
+  }
+
+  fs::write(&path, content)
+    .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+
+  Ok(ExecResult {
+    ok: true,
+    status: 0,
+    stdout: format!("Wrote {}", path.display()),
+    stderr: String::new(),
+  })
+}
+
 pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
@@ -293,7 +396,9 @@ pub fn run() {
       engine_stop,
       engine_info,
       opkg_install,
-      import_skill
+      import_skill,
+      read_opencode_config,
+      write_opencode_config
     ])
     .run(tauri::generate_context!())
     .expect("error while running OpenWork");
