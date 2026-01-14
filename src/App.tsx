@@ -460,9 +460,40 @@ export default function App() {
     return [] as string[];
   };
 
-  const pluginNamesLower = createMemo(() =>
-    new Set(pluginList().map((entry) => entry.toLowerCase())),
-  );
+  const stripPluginVersion = (spec: string) => {
+    const trimmed = spec.trim();
+    if (!trimmed) return "";
+
+    const looksLikeVersion = (suffix: string) =>
+      /^(latest|next|beta|alpha|canary|rc|stable|\d)/i.test(suffix);
+
+    if (trimmed.startsWith("@")) {
+      const slashIndex = trimmed.indexOf("/");
+      if (slashIndex === -1) return trimmed;
+
+      const atIndex = trimmed.indexOf("@", slashIndex + 1);
+      if (atIndex === -1) return trimmed;
+
+      const suffix = trimmed.slice(atIndex + 1);
+      return looksLikeVersion(suffix) ? trimmed.slice(0, atIndex) : trimmed;
+    }
+
+    const atIndex = trimmed.indexOf("@");
+    if (atIndex === -1) return trimmed;
+
+    const suffix = trimmed.slice(atIndex + 1);
+    return looksLikeVersion(suffix) ? trimmed.slice(0, atIndex) : trimmed;
+  };
+
+  const pluginNamesLower = createMemo(() => {
+    const normalized = pluginList().flatMap((entry) => {
+      const raw = entry.toLowerCase();
+      const stripped = stripPluginVersion(entry).toLowerCase();
+      return stripped && stripped !== raw ? [raw, stripped] : [raw];
+    });
+
+    return new Set(normalized);
+  });
 
   const isPluginInstalled = (pluginName: string, aliases: string[] = []) => {
     const list = pluginNamesLower();
@@ -927,7 +958,8 @@ export default function App() {
       const parsed = parse(raw) as Record<string, unknown> | undefined;
       const plugins = normalizePluginList(parsed?.plugin);
 
-      if (plugins.some((entry) => entry.toLowerCase() === pluginName.toLowerCase())) {
+      const desired = stripPluginVersion(pluginName).toLowerCase();
+      if (plugins.some((entry) => stripPluginVersion(entry).toLowerCase() === desired)) {
         setPluginStatus("Plugin already listed in opencode.json.");
         return;
       }
