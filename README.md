@@ -17,6 +17,8 @@ It’s a native desktop app that runs **OpenCode** under the hood, but presents 
 The goal: make “agentic work” feel like a product, not a terminal.
 
 
+## Quick start
+Download the dmg here https://github.com/different-ai/openwork/releases (or install from source below)
 
 ## Why
 
