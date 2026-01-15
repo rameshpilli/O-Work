@@ -9,6 +9,15 @@ export type EngineInfo = {
   pid: number | null;
 };
 
+export type EngineDoctorResult = {
+  found: boolean;
+  inPath: boolean;
+  resolvedPath: string | null;
+  version: string | null;
+  supportsServe: boolean;
+  notes: string[];
+};
+
 export async function engineStart(projectDir: string): Promise<EngineInfo> {
   return invoke<EngineInfo>("engine_start", { projectDir });
 }
@@ -19,6 +28,10 @@ export async function engineStop(): Promise<EngineInfo> {
 
 export async function engineInfo(): Promise<EngineInfo> {
   return invoke<EngineInfo>("engine_info");
+}
+
+export async function engineDoctor(): Promise<EngineDoctorResult> {
+  return invoke<EngineDoctorResult>("engine_doctor");
 }
 
 export async function pickDirectory(options?: {
@@ -41,6 +54,10 @@ export type ExecResult = {
   stdout: string;
   stderr: string;
 };
+
+export async function engineInstall(): Promise<ExecResult> {
+  return invoke<ExecResult>("engine_install");
+}
 
 export async function opkgInstall(projectDir: string, pkg: string): Promise<ExecResult> {
   return invoke<ExecResult>("opkg_install", { projectDir, package: pkg });

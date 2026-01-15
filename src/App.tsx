@@ -50,7 +50,9 @@ import PartView from "./components/PartView";
 import TextInput from "./components/TextInput";
 import { createClient, unwrap, waitForHealthy } from "./lib/opencode";
 import {
+  engineDoctor,
   engineInfo,
+  engineInstall,
   engineStart,
   engineStop,
   importSkill,
@@ -58,6 +60,7 @@ import {
   pickDirectory,
   readOpencodeConfig,
   writeOpencodeConfig,
+  type EngineDoctorResult,
   type EngineInfo,
   type OpencodeConfigFile,
 } from "./lib/tauri";
@@ -414,6 +417,9 @@ export default function App() {
   const [tab, setTab] = createSignal<DashboardTab>("home");
 
   const [engine, setEngine] = createSignal<EngineInfo | null>(null);
+  const [engineDoctorResult, setEngineDoctorResult] = createSignal<EngineDoctorResult | null>(null);
+  const [engineDoctorCheckedAt, setEngineDoctorCheckedAt] = createSignal<number | null>(null);
+  const [engineInstallLogs, setEngineInstallLogs] = createSignal<string | null>(null);
 
   const [projectDir, setProjectDir] = createSignal("");
   const [authorizedDirs, setAuthorizedDirs] = createSignal<string[]>([]);
@@ -607,6 +613,20 @@ export default function App() {
     }
   }
 
+  async function refreshEngineDoctor() {
+    if (!isTauriRuntime()) return;
+
+    try {
+      const result = await engineDoctor();
+      setEngineDoctorResult(result);
+      setEngineDoctorCheckedAt(Date.now());
+    } catch (e) {
+      setEngineDoctorResult(null);
+      setEngineDoctorCheckedAt(Date.now());
+      setEngineInstallLogs(e instanceof Error ? e.message : safeStringify(e));
+    }
+  }
+
   async function loadSessions(c: Client) {
     const list = unwrap(await c.session.list());
     setSessions(list);
@@ -670,6 +690,26 @@ export default function App() {
     if (!dir) {
       setError("Pick a folder path to start OpenCode in.");
       return false;
+    }
+
+    try {
+      const result = await engineDoctor();
+      setEngineDoctorResult(result);
+      setEngineDoctorCheckedAt(Date.now());
+
+      if (!result.found) {
+        setError(
+          "OpenCode CLI not found. Install with `brew install anomalyco/tap/opencode` or `curl -fsSL https://opencode.ai/install | bash`, then retry.",
+        );
+        return false;
+      }
+
+      if (!result.supportsServe) {
+        setError("OpenCode CLI is installed, but `opencode serve` is unavailable. Update OpenCode and retry.");
+        return false;
+      }
+    } catch (e) {
+      setEngineInstallLogs(e instanceof Error ? e.message : safeStringify(e));
     }
 
     setError(null);
@@ -1198,6 +1238,7 @@ export default function App() {
     }
 
     await refreshEngine();
+    await refreshEngineDoctor();
 
     const info = engine();
     if (info?.baseUrl) {
@@ -1254,6 +1295,12 @@ export default function App() {
     if (!ok) {
       setOnboardingStep("client");
     }
+  });
+
+  createEffect(() => {
+    if (!isTauriRuntime()) return;
+    if (onboardingStep() !== "host") return;
+    void refreshEngineDoctor();
   });
 
   createEffect(() => {
@@ -1642,6 +1689,115 @@ export default function App() {
                     </Button>
                   </div>
 
+                  <Show when={isTauriRuntime()}>
+                    <div class="rounded-2xl bg-zinc-900/40 border border-zinc-800 p-4">
+                      <div class="flex items-start justify-between gap-4">
+                        <div class="min-w-0">
+                          <div class="text-sm font-medium text-white">OpenCode CLI</div>
+                          <div class="mt-1 text-xs text-zinc-500">
+                            <Show
+                              when={engineDoctorResult()}
+                              fallback={<span>Checking install…</span>}
+                            >
+                              <Show
+                                when={engineDoctorResult()?.found}
+                                fallback={<span>Not found. Install to run Host mode.</span>}
+                              >
+                                <span class="font-mono">
+                                  {engineDoctorResult()?.version ?? "Installed"}
+                                </span>
+                                <Show when={engineDoctorResult()?.resolvedPath}>
+                                  <span class="text-zinc-600"> · </span>
+                                  <span class="font-mono text-zinc-600 truncate">
+                                    {engineDoctorResult()?.resolvedPath}
+                                  </span>
+                                </Show>
+                              </Show>
+                            </Show>
+                          </div>
+                        </div>
+
+                        <Button
+                          variant="secondary"
+                          onClick={async () => {
+                            setEngineInstallLogs(null);
+                            await refreshEngineDoctor();
+                          }}
+                          disabled={busy()}
+                        >
+                          Re-check
+                        </Button>
+                      </div>
+
+                      <Show when={engineDoctorResult() && !engineDoctorResult()!.found}>
+                        <div class="mt-4 space-y-2">
+                          <div class="text-xs text-zinc-500">Install one of these:</div>
+                          <div class="rounded-xl bg-black/40 border border-zinc-800 px-3 py-2 font-mono text-xs text-zinc-300">
+                            brew install anomalyco/tap/opencode
+                          </div>
+                          <div class="rounded-xl bg-black/40 border border-zinc-800 px-3 py-2 font-mono text-xs text-zinc-300">
+                            curl -fsSL https://opencode.ai/install | bash
+                          </div>
+
+                          <div class="flex gap-2 pt-2">
+                            <Button
+                              onClick={async () => {
+                                setError(null);
+                                setEngineInstallLogs(null);
+                                setBusy(true);
+                                setBusyLabel("Installing OpenCode");
+                                setBusyStartedAt(Date.now());
+
+                                try {
+                                  const result = await engineInstall();
+                                  const combined = `${result.stdout}${result.stderr ? `\n${result.stderr}` : ""}`.trim();
+                                  setEngineInstallLogs(combined || null);
+
+                                  if (!result.ok) {
+                                    setError(
+                                      result.stderr.trim() || "OpenCode install failed. See logs above.",
+                                    );
+                                  }
+
+                                  await refreshEngineDoctor();
+                                } catch (e) {
+                                  setError(e instanceof Error ? e.message : safeStringify(e));
+                                } finally {
+                                  setBusy(false);
+                                  setBusyLabel(null);
+                                  setBusyStartedAt(null);
+                                }
+                              }}
+                              disabled={busy()}
+                            >
+                              Install OpenCode
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => {
+                                const notes = engineDoctorResult()?.notes?.join("\n") ?? "";
+                                setEngineInstallLogs(notes || null);
+                              }}
+                              disabled={busy()}
+                            >
+                              Show search notes
+                            </Button>
+                          </div>
+                        </div>
+                      </Show>
+
+                      <Show when={engineInstallLogs()}>
+                        <pre class="mt-4 max-h-48 overflow-auto rounded-xl bg-black/50 border border-zinc-800 p-3 text-xs text-zinc-300 whitespace-pre-wrap">{engineInstallLogs()}</pre>
+                      </Show>
+
+                      <Show when={engineDoctorCheckedAt()}>
+                        <div class="mt-3 text-[11px] text-zinc-600">
+                          Last checked {new Date(engineDoctorCheckedAt()!).toLocaleTimeString()}
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
+
                   <Button
                     onClick={async () => {
                       if (!authorizedDirs().length && projectDir().trim()) {
@@ -1655,7 +1811,12 @@ export default function App() {
                         setOnboardingStep("host");
                       }
                     }}
-                    disabled={busy()}
+                    disabled={
+                      busy() ||
+                      (isTauriRuntime() &&
+                        (engineDoctorResult()?.found === false ||
+                          engineDoctorResult()?.supportsServe === false))
+                    }
                     class="w-full py-3 text-base"
                   >
                     Confirm & Start Engine
