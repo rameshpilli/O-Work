@@ -34,24 +34,31 @@ jobs:
             args: "--target x86_64-apple-darwin --bundles dmg"
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Set release tag
+      - name: Resolve checkout ref + release tag
         shell: bash
         run: |
           set -euo pipefail
 
           TAG_INPUT="${{ inputs.tag }}"
           if [ -n "$TAG_INPUT" ]; then
-            TAG="$TAG_INPUT"
+            if [[ "$TAG_INPUT" == v* ]]; then
+              TAG="$TAG_INPUT"
+            else
+              TAG="v$TAG_INPUT"
+            fi
+            CHECKOUT_REF="$TAG"
           else
             TAG="${GITHUB_REF_NAME}"
+            CHECKOUT_REF="${GITHUB_REF}"
           fi
 
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "CHECKOUT_REF=$CHECKOUT_REF" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -81,6 +88,8 @@ jobs:
           printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
           chmod 600 "$NOTARY_KEY_PATH"
 
+          echo "NOTARY_KEY_PATH=$NOTARY_KEY_PATH" >> "$GITHUB_ENV"
+
       - name: Build + upload (tauri-action)
         uses: tauri-apps/tauri-action@v0.5.17
         env:
@@ -95,7 +104,7 @@ jobs:
           # macOS notarization (App Store Connect API key)
           APPLE_API_KEY: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
-          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          APPLE_API_KEY_PATH: ${{ env.NOTARY_KEY_PATH }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: OpenWork ${{ env.RELEASE_TAG }}
