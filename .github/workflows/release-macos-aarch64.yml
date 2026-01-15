@@ -90,9 +90,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          pnpm build -- --bundles dmg
+          pnpm exec tauri build --bundles dmg
 
-          DMG_PATH="$(ls -1 src-tauri/target/release/bundle/dmg/*.dmg | head -n 1)"
+          DMG_PATH="$(ls -1 "$GITHUB_WORKSPACE/src-tauri/target/release/bundle/dmg/"*.dmg | head -n 1)"
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
           echo "Built DMG: $DMG_PATH"
 
