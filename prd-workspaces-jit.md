@@ -1,205 +1,280 @@
-# PRD — Just-in-Time Workspaces + Folder Access (OpenWork)
+# PRD — Folder-Scoped Workspaces (JIT) + Starter Workspace (OpenWork)
 
 ## Summary
 
-OpenWork currently asks users to select a project folder and pre-authorize folders during Host onboarding ("Authorized Workspaces"). This is correct for least-privilege, but it’s high-friction and happens too early.
+OpenWork currently asks users to pick a folder at app start (Host onboarding) and pre-authorize access up front. This is safe, but it’s the wrong moment: users just want to try the product and start a task.
 
-This PRD proposes:
+This PRD reframes “workspace” around **OpenCode primitives**:
 
-1. **Just-in-time (JIT) workspace selection**: users pick a workspace when they *start a task / send the first prompt*, not on app launch.
-2. **First-class Workspaces**: named, reusable contexts that bundle:
-   - primary project directory
-   - additional authorized folders (0..N)
-   - workspace-scoped plugins (project `opencode.json`)
-   - workspace-scoped skills (`.opencode/skill`)
-3. **JIT folder expansion**: when a task needs access to a new folder, OpenWork offers “Allow once / Allow for workspace / Deny” and can add that folder to the workspace.
+- **Primary primitive: folders.** A workspace is a folder.
+- **Workspace scope is already defined by OpenCode’s project model**:
+  - Plugins/MCP live in project `opencode.json`
+  - Skills live in project `.opencode/skill`
+  - The OpenCode client already accepts a `directory` (folder) to scope project behavior
 
-This keeps OpenWork safe and local-first, but moves the permission burden to the moment it’s actually needed.
+### What changes
+
+1. **Just-in-time (JIT) workspace selection**: pick a workspace when you start work (new session / first prompt / run template), not at app launch.
+2. **Starter Workspace**: OpenWork ships/creates a “ready-to-run” default folder-workspace so new users can start immediately.
+3. **Workspace templates**: creating a workspace is “choose a folder + apply a template” (writes OpenCode-native files like `opencode.json` and `.opencode/*`).
+4. **JIT folder expansion**: when a task needs access to a new folder, OpenWork offers “Allow once / Add to workspace / Deny”.
+
+This keeps least-privilege, but moves permissions to the moment of intent.
+
+## Design Principle (Guiding)
+
+OpenWork should **prefer OpenCode primitives** before inventing new ones.
+
+For “workspaces”, that means:
+
+- A workspace should map to a real **folder**.
+- Workspace configuration should live in existing OpenCode surfaces:
+  - `opencode.json` (project scope plugins/MCP)
+  - `.opencode/skill` (project scope skills)
+- Any OpenWork-only metadata should still live *inside the folder* (e.g. `.opencode/openwork.json`) rather than a separate global database.
 
 ## Problem
 
-The current Host onboarding forces users to make file-scope decisions before they understand what they’re doing:
+The current onboarding step “Authorized Workspaces” front-loads decisions that users don’t understand yet:
 
-- Users want to “try OpenWork” without committing to a folder.
-- Users often don’t know which folder matters until they start typing a task.
-- Users commonly work across multiple contexts (e.g., a work repo, personal notes, Downloads), which doesn’t map cleanly to a single “project folder”.
-- The mental model is unclear: are we picking a *project*, authorizing *folders*, or creating a *profile*?
+- Users want to try OpenWork without choosing a folder.
+- Users often don’t know what folder they need until they write the task.
+- Users commonly work across multiple folders (repo + docs + downloads), which doesn’t fit a single “project dir” prompt.
 
-The result is a premium-feeling UI that still has a “developer onboarding cliff” right at the start.
+The result: a premium UI with an early “developer cliff”.
 
 ## Goals
 
-- **Remove the upfront folder picker** from first-run Host onboarding.
-- **Introduce Workspaces** as the primary access boundary in OpenWork.
-- **Select a workspace at the moment of work** (create session / send prompt / run template).
-- **Support many workspaces** and quick switching.
-- **Allow multiple authorized folders per workspace** and add them later.
-- Preserve **least privilege** and **explicit user intent**.
-- Keep **parity with OpenCode primitives**:
-  - workspace-scoped configuration maps to OpenCode’s project scope (`directory`, `opencode.json`, `.opencode/skill`).
+- Remove upfront folder selection from first-run Host onboarding.
+- Treat “workspace” as a **folder-scoped OpenCode project**.
+- Provide a **Starter Workspace** that works out-of-the-box.
+- Let users create many workspaces quickly using templates.
+- Support multiple authorized folders per workspace and add them JIT.
+- Keep parity with OpenCode behavior and config surfaces.
 
 ## Non-goals
 
 - Replacing OpenCode’s permission system.
-- Solving multi-user/team workspace sharing (future).
-- Designing a full Git/IDE-style project manager.
-- Shipping a cross-device workspace sync solution in the first iteration.
+- Multi-user workspace sharing and sync (future).
+- Full IDE-style project management.
 
-## Current Architecture (Constraints)
+## Current Constraints
 
-- OpenWork runs in two permission layers (as described in `design-prd.md`):
-  1. OpenWork UI authorization via native folder picker
-  2. OpenCode server permissions via permission events
+- OpenWork effectively has two layers of access control:
+  1. OS/native folder picking and OpenWork-managed allowed roots
+  2. OpenCode permission requests surfaced via events
 
-- OpenWork currently treats “workspace” as a selected `directory` and uses it to:
-  - choose the OpenCode client `directory`
-  - decide where to install skills (`.opencode/skill`)
-  - read/write project plugin config (`opencode.json`)
-
-- Host mode still needs to start the OpenCode server somewhere (working directory).
+- Host mode currently expects a project directory early.
 
 ## Proposal
 
-### 1) Define “Workspace” as a first-class object
+### 1) Workspace = Folder + OpenCode config
 
-A workspace is a named context that defines:
+A workspace is identified by its folder path (primary directory).
 
-- **Primary folder**: the main directory used for project-scoped config (`opencode.json`, `.opencode/skill`).
-- **Authorized folders**: additional allowed roots the agent may access (e.g., `~/Downloads`, a docs folder, another repo).
-- **Scope**:
-  - Plugins: project-scope `opencode.json` associated with the workspace
-  - Skills: workspace-scope `.opencode/skill` in the workspace primary folder (plus optional global skills)
+Within that folder:
 
-Minimal workspace fields (conceptual):
+- Plugins/MCP configuration: `opencode.json`
+- Skills: `.opencode/skill/*`
+- OpenWork metadata (optional): `.opencode/openwork.json`
 
-- `id`
-- `name`
-- `primaryDir`
-- `authorizedDirs: string[]`
-- `createdAt`, `lastUsedAt`
-- `pinned?: boolean`
+This aligns with existing OpenCode project scoping (`directory`), and keeps workspaces reconstructable.
 
-### 2) Move folder selection to JIT moments
+### 2) Starter Workspace (first-run default)
 
-Instead of requiring a folder before the user can proceed, only prompt for a workspace when:
+On first Host launch, OpenWork creates (or initializes) a default workspace folder (the “Starter Workspace”).
 
-- creating a new session
-- sending a prompt
+Suggested folder location (app-managed, no user picker):
+
+- macOS: `~/Library/Application Support/OpenWork/workspaces/starter`
+- Linux: `~/.local/share/openwork/workspaces/starter`
+- Windows: `%APPDATA%\\OpenWork\\workspaces\\starter`
+
+The Starter Workspace is a real folder workspace with a template applied:
+
+- `opencode.json` includes a recommended “starter” plugin set
+  - includes `different-ai/opencode-scheduler` by default
+- `.opencode/skill` can optionally include a small set of curated starter skills (future)
+
+This means:
+
+- The user can reach the dashboard and run a first task without selecting any folder.
+- The workspace model is visible and consistent from minute one.
+
+### 3) Workspace templates (folder-native)
+
+Creating a workspace becomes:
+
+1. Pick or create a folder (JIT)
+2. Choose a template
+3. OpenWork writes/updates OpenCode-native files in that folder
+
+Template examples:
+
+- **Starter (recommended)**
+  - installs/enables `different-ai/opencode-scheduler`
+  - optionally suggests the browser/plugin set (future)
+- **Minimal**
+  - no plugins; purely connect and run
+- **Automation**
+  - scheduler + any supported automation plugins
+
+The important rule: templates should not create a parallel config system. They should materialize into `opencode.json` and `.opencode/*`.
+
+### 4) JIT workspace selection moments
+
+Workspace selection happens when:
+
+- starting a new session
+- sending the first prompt (if no session)
 - running a template
 
-When there is no active workspace, show a sheet:
+If there is no active workspace, OpenWork shows a lightweight “Workspace Picker” sheet:
 
-- **Pick a workspace** (recent + pinned)
-- **Create new workspace**
-- **Quick task (no file access)** (runs in a sandboxed, empty directory)
+- Recent workspaces (folders)
+- Starter Workspace (pinned)
+- “New workspace…”
+- “Quick task (no file access)” (uses Starter Workspace in read-only/no-extra-folders mode)
 
-### 3) JIT “expand workspace” when the agent needs more access
+### 5) JIT folder expansion (“Add to workspace”)
 
-When a tool call or user action requires access outside the workspace’s authorized roots, OpenWork prompts:
+When the agent needs to read/write outside currently authorized roots, OpenWork prompts:
 
 - Allow once (session-only)
-- Allow for this workspace (persist by adding folder to workspace)
+- Add to workspace (persist folder into workspace’s authorized folder list)
 - Deny
 
-This should be the default mechanism for “add as many folders as needed” without a dedicated onboarding step.
+Storage:
 
-### 4) Host engine start without requiring a project folder
+- authorized folders are recorded in `.opencode/openwork.json` inside the workspace folder
 
-We need a safe default for starting the engine even before a workspace is selected.
+This keeps the “workspace = folder” model intact while still allowing multi-folder workflows.
 
-Recommended approach:
-
-- Start the engine in an **OpenWork sandbox directory** (app-managed), e.g.
-  - macOS: `~/Library/Application Support/OpenWork/sandbox`
-  - Linux: `~/.local/share/openwork/sandbox`
-  - Windows: `%APPDATA%\\OpenWork\\sandbox`
-
-Then, when the user selects a workspace, OpenWork connects a client with `directory = workspace.primaryDir`.
-
-Alternative (future): delay engine start until first workspace selection. This can reduce background work, but makes “instant app ready” harder.
-
-## UX / UI Surfaces
-
-### Onboarding (Host)
-
-Replace “Authorized Workspaces” with:
-
-- Engine setup (already present)
-- A short explanation:
-  - “You’ll pick a workspace when you start a task.”
-  - “OpenWork will ask before reading or writing files.”
-
-Primary action:
-- Continue to dashboard
-
-### Workspace Switcher
-
-Add a workspace switcher UI element that is always visible:
-
-- Dashboard header: “Workspace: <name>” chip
-- Prompt bar: workspace chip (tap to switch)
-
-When tapped:
-
-- recent workspaces list
-- search
-- “New workspace…”
-- “Manage workspaces”
-
-### Workspace Manager (Settings)
-
-A dedicated Settings page:
-
-- Create / rename / delete workspaces
-- Edit workspace:
-  - change primary folder
-  - view/add/remove authorized folders
-  - show plugin config path (project-scope)
-  - show skill locations (workspace-scope)
-
-### Skills + Plugins Scoping
-
-Skills tab:
-
-- Filter by workspace
-- Install skill into:
-  - “This workspace” (default)
-  - “Global” (optional; future)
+### 6) Plugins + Skills scoping becomes workspace-first
 
 Plugins tab:
 
-- Default view is “Current workspace” (project `opencode.json`)
-- Secondary view is “Global” (`~/.config/opencode/opencode.json`)
+- Default scope = current workspace (`<workspace>/opencode.json`)
+- Secondary scope = global (`~/.config/opencode/opencode.json`)
+
+Skills tab:
+
+- Default install target = current workspace (`<workspace>/.opencode/skill`)
+- Optional future: global skills (explicit)
+
+## UX / UI Elements
+
+### A) Workspace Chip (always visible)
+
+A compact chip in the dashboard header and prompt bar:
+
+- shows active workspace name/folder
+- tap to open workspace picker
+
+### B) Workspace Picker (sheet)
+
+- Recent + pinned
+- Search by folder/name
+- Create new workspace
+- Manage workspaces
+
+### C) Workspace Creation Flow (folder + template)
+
+Wizard steps:
+
+1. Choose folder (existing or create new)
+2. Name workspace (defaults from folder name)
+3. Select template (Starter / Minimal / …)
+4. Review “This will write: `opencode.json`, `.opencode/openwork.json`”
+
+### D) Workspace Settings page
+
+Per workspace:
+
+- rename
+- change primary folder (advanced)
+- view plugin config path
+- list authorized folders, add/remove
+- “Reset template” (re-apply template to `opencode.json` safely)
+
+### E) “Add Folder” affordance
+
+When a user wants to reference a folder in a prompt (e.g. “Use files in Downloads”), provide an obvious affordance:
+
+- “Add folder…” button near the prompt input
+
+This triggers the same JIT folder addition flow (adds to workspace or once).
+
+## User Flows (Concrete)
+
+### Flow 1 — First run (Host)
+
+1. User launches OpenWork.
+2. Engine setup runs.
+3. OpenWork lands user in dashboard with Starter Workspace active.
+4. Prompt input is ready.
+
+### Flow 2 — First task (no folder selection)
+
+1. User types: “Summarize my meeting notes.”
+2. Task runs inside Starter Workspace.
+3. If the task never touches external files, no folder prompts appear.
+
+### Flow 3 — Task needs local files (JIT)
+
+1. User types: “Summarize the PDF in my Downloads.”
+2. OpenWork sees access request or user clicks “Add folder…”.
+3. OpenWork prompts:
+   - Allow once
+   - Add to workspace
+   - Deny
+4. If “Add to workspace”, the folder is saved in `.opencode/openwork.json`.
+
+### Flow 4 — Create a new workspace for a repo
+
+1. User clicks Workspace chip → “New workspace…”.
+2. Picks an existing repo folder.
+3. Chooses template “Starter (recommended)”.
+4. OpenWork writes `opencode.json` (with scheduler) and `.opencode/openwork.json`.
+5. Workspace becomes active; Plugins/Skills tabs now reflect that folder.
+
+### Flow 5 — Switching workspaces
+
+1. User taps Workspace chip.
+2. Picks another workspace.
+3. OpenWork re-connects client with `directory = workspace folder`.
+4. UI refreshes:
+   - plugin config
+   - skills list
+   - session list (optional filtering; future)
 
 ## Technical Notes (No Implementation Yet)
 
-- Store workspaces in IndexedDB (OpenWork state) and optionally mirror to a JSON file for portability.
-- When switching workspaces:
-  - recreate the OpenCode client using the workspace’s `directory`
-  - re-load plugin config in project scope
-  - refresh skills list (workspace `.opencode/skill`)
-- When a folder is approved “for workspace”, persist it into `workspace.authorizedDirs`.
+- Workspace list can be stored as “recent folders” in IndexedDB, but the source of truth for workspace-scoped policy should live in the folder (`.opencode/openwork.json`).
+- Workspace templates should be represented as a deterministic `opencode.json` patch.
+- Starter Workspace is created/initialized on first run and pinned.
 
 ## Migration
 
-For existing users with a saved `projectDir` and `authorizedDirs`:
+For users with existing saved `projectDir` and `authorizedDirs`:
 
-- Create an initial workspace named “Default” on first run after the update.
-- Set `primaryDir = projectDir`, `authorizedDirs = authorizedDirs`.
+- Treat the existing `projectDir` as a workspace folder.
+- Create `.opencode/openwork.json` in that folder capturing current authorized dirs.
+- Mark it as a recent workspace.
 
 ## Acceptance Criteria
 
 - Fresh install:
-  - User can reach the dashboard without selecting a folder.
-  - First task run prompts for a workspace (or offers a sandboxed quick task).
-- User can create 2+ workspaces and switch between them.
-- User can add multiple authorized folders to a workspace over time.
-- If a task attempts to access a folder outside authorization, OpenWork prompts with clear choices and can persist the decision.
-- Plugins and skills reflect the active workspace scope.
+  - user reaches dashboard without choosing any folder
+  - Starter Workspace exists and is active
+  - user can run a task immediately
+- User can create 2+ folder workspaces and switch between them.
+- Adding access to a new folder is possible “JIT” and can be persisted to the workspace.
+- Plugins and skills reflect the active folder workspace scope (project vs global).
 
 ## Open Questions
 
-- Should “Quick task (no file access)” be allowed to run with *zero* authorized folders, or should it still require selecting one folder for the session?
-- How should OpenWork represent “global skills” vs “workspace skills” while staying faithful to OpenCode’s `.opencode/skill` model?
-- Should workspaces be purely “project = folder”, or can a workspace have a distinct config home with many unrelated authorized folders?
-- For mobile Client mode, how should the host expose the list of workspaces (and which are permitted to the client)?
+- Should the Starter Workspace be fully hidden (just works) or visible and editable from day one?
+- Do we want to include a minimal default `opencode.json` in Starter, or only prompt users to install plugins?
+- How should mobile Client mode enumerate available workspaces on the host (and enforce which ones are exposed)?
+- What is the cleanest OpenCode-native way to express “authorized folders” if we want to avoid any OpenWork-specific file (`.opencode/openwork.json`)?

@@ -13,6 +13,7 @@ OpenWork exists to bring OpenCode's agentic power to non-technical people throug
 
 - **Purpose-first UI**: prioritize clarity, safety, and approachability for non-technical users.
 - **Parity with OpenCode**: anything the UI can do must map cleanly to OpenCode tools.
+- **Prefer OpenCode primitives**: represent concepts using OpenCode’s native surfaces first (folders/projects, `.opencode`, `opencode.json`, skills, plugins) before introducing new abstractions.
 - **Self-referential**: maintain a gitignored mirror of OpenCode at `vendor/opencode` for inspection.
 - **Self-building**: prefer prompts, skills, and composable primitives over bespoke logic.
 - **Open source**: keep the repo portable; no secrets committed.
