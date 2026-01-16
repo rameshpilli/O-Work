@@ -85,3 +85,31 @@ Key primitives to expose:
 | Animation frame rate | 60fps |
 | Interaction latency | <100ms |
 | Bundle size (JS) | <200KB gzipped |
+
+## Skill: Trigger a Release
+
+OpenWork releases are built by GitHub Actions (`Release App`) and publish signed + notarized macOS DMGs to the GitHub Release for a tag.
+
+### Standard release (recommended)
+
+1. Bump versions (at minimum `apps/openwork/package.json`, and keep Tauri/Rust versions in sync).
+2. Merge to `main`.
+3. Create and push a version tag:
+
+   - `git tag vX.Y.Z`
+   - `git push origin vX.Y.Z`
+
+This triggers the workflow automatically (`on: push.tags: v*`).
+
+### Re-run / repair an existing release
+
+If the workflow needs to be re-run for an existing tag (e.g. notarization retry), use workflow dispatch:
+
+- `gh workflow run "Release App" --repo different-ai/openwork -f tag=vX.Y.Z`
+
+### Verify
+
+- `gh run list --repo different-ai/openwork --workflow "Release App" --limit 5`
+- `gh release view vX.Y.Z --repo different-ai/openwork`
+
+Confirm the DMG assets are attached and versioned correctly.
