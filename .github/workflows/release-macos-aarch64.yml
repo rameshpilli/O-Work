@@ -87,6 +87,7 @@ jobs:
       - name: Build Tauri DMG (Apple Silicon)
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
@@ -95,6 +96,21 @@ jobs:
           DMG_PATH="$(ls -1 "$GITHUB_WORKSPACE/src-tauri/target/release/bundle/dmg/"*.dmg | head -n 1)"
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
           echo "Built DMG: $DMG_PATH"
+
+      - name: Collect updater artifacts
+        run: |
+          set -euo pipefail
+
+          UPDATER_DIR="$GITHUB_WORKSPACE/src-tauri/target/release/bundle/macos"
+
+          UPDATE_ARCHIVE="$(ls -1 "$UPDATER_DIR/"*.app.tar.gz | head -n 1)"
+          UPDATE_SIG_PATH="$(ls -1 "$UPDATER_DIR/"*.app.tar.gz.sig | head -n 1)"
+
+          echo "UPDATE_ARCHIVE=$UPDATE_ARCHIVE" >> "$GITHUB_ENV"
+          echo "UPDATE_SIG_PATH=$UPDATE_SIG_PATH" >> "$GITHUB_ENV"
+
+          echo "Update archive: $UPDATE_ARCHIVE"
+          echo "Update signature: $UPDATE_SIG_PATH"
 
       - name: Sign DMG (Developer ID)
         env:

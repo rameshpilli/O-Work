@@ -64,6 +64,17 @@ export type OpencodeConfigFile = {
   content: string | null;
 };
 
+export type UpdaterEnvironment = {
+  supported: boolean;
+  reason: string | null;
+  executablePath: string | null;
+  appBundlePath: string | null;
+};
+
+export async function updaterEnvironment(): Promise<UpdaterEnvironment> {
+  return invoke<UpdaterEnvironment>("updater_environment");
+}
+
 export async function readOpencodeConfig(
   scope: "project" | "global",
   projectDir: string,

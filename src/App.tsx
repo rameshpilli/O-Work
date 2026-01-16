@@ -44,6 +44,10 @@ import {
   Zap,
 } from "lucide-solid";
 
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
+
 import Button from "./components/Button";
 import OpenWorkLogo from "./components/OpenWorkLogo";
 import PartView from "./components/PartView";
@@ -57,9 +61,11 @@ import {
   opkgInstall,
   pickDirectory,
   readOpencodeConfig,
+  updaterEnvironment,
   writeOpencodeConfig,
   type EngineInfo,
   type OpencodeConfigFile,
+  type UpdaterEnvironment,
 } from "./lib/tauri";
 
 type Client = ReturnType<typeof createClient>;
@@ -297,6 +303,15 @@ function safeStringify(value: unknown) {
   }
 }
 
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"] as const;
+  const idx = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / Math.pow(1024, idx);
+  const rounded = idx === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded} ${units[idx]}`;
+}
+
 function normalizeEvent(raw: unknown): OpencodeEvent | null {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -465,6 +480,40 @@ export default function App() {
   const [busyStartedAt, setBusyStartedAt] = createSignal<number | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
+  const [appVersion, setAppVersion] = createSignal<string | null>(null);
+
+  const [updateChannel, setUpdateChannel] = createSignal<"stable" | "beta">("stable");
+  const [updateAutoCheck, setUpdateAutoCheck] = createSignal(true);
+
+  const [updateEnv, setUpdateEnv] = createSignal<UpdaterEnvironment | null>(null);
+
+  type UpdateHandle = {
+    available: boolean;
+    currentVersion: string;
+    version: string;
+    date?: string;
+    body?: string;
+    rawJson: Record<string, unknown>;
+    close: () => Promise<void>;
+    download: (onEvent?: (event: any) => void) => Promise<void>;
+    install: () => Promise<void>;
+    downloadAndInstall: (onEvent?: (event: any) => void) => Promise<void>;
+  };
+
+  const [updateStatus, setUpdateStatus] = createSignal<
+    | { state: "idle"; lastCheckedAt: number | null }
+    | { state: "checking"; startedAt: number }
+    | { state: "available"; lastCheckedAt: number; version: string; date?: string; notes?: string }
+    | { state: "downloading"; lastCheckedAt: number; version: string; totalBytes: number | null; downloadedBytes: number; notes?: string }
+    | { state: "ready"; lastCheckedAt: number; version: string; notes?: string }
+    | { state: "error"; lastCheckedAt: number | null; message: string }
+  >({ state: "idle", lastCheckedAt: null });
+
+  const [pendingUpdate, setPendingUpdate] = createSignal<
+    | null
+    | { update: UpdateHandle; version: string; notes?: string }
+  >(null);
+
   const busySeconds = createMemo(() => {
     const start = busyStartedAt();
     if (!start) return 0;
@@ -604,6 +653,139 @@ export default function App() {
       }
     } catch {
       // ignore
+    }
+  }
+
+  function anyActiveRuns() {
+    const statuses = sessionStatusById();
+    return sessions().some((s) => statuses[s.id] === "running" || statuses[s.id] === "retry");
+  }
+
+  async function checkForUpdates(options?: { quiet?: boolean }) {
+    if (!isTauriRuntime()) return;
+
+    const env = updateEnv();
+    if (env && !env.supported) {
+      if (!options?.quiet) {
+        setUpdateStatus({
+          state: "error",
+          lastCheckedAt:
+            updateStatus().state === "idle"
+              ? (updateStatus() as { state: "idle"; lastCheckedAt: number | null }).lastCheckedAt
+              : null,
+          message: env.reason ?? "Updates are not supported in this environment.",
+        });
+      }
+      return;
+    }
+
+    const prev = updateStatus();
+    setUpdateStatus({ state: "checking", startedAt: Date.now() });
+
+    try {
+      const update = (await check({
+        target: updateChannel() === "beta" ? "beta" : "stable",
+        timeout: 8_000,
+      })) as unknown as UpdateHandle | null;
+      const checkedAt = Date.now();
+
+      if (!update) {
+        setPendingUpdate(null);
+        setUpdateStatus({ state: "idle", lastCheckedAt: checkedAt });
+        return;
+      }
+
+      const notes = typeof update.body === "string" ? update.body : undefined;
+      setPendingUpdate({ update, version: update.version, notes });
+      setUpdateStatus({
+        state: "available",
+        lastCheckedAt: checkedAt,
+        version: update.version,
+        date: update.date,
+        notes,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : safeStringify(e);
+
+      if (options?.quiet) {
+        setUpdateStatus(prev);
+        return;
+      }
+
+      setPendingUpdate(null);
+      setUpdateStatus({ state: "error", lastCheckedAt: null, message });
+    }
+  }
+
+  async function downloadUpdate() {
+    const pending = pendingUpdate();
+    if (!pending) return;
+
+    setError(null);
+
+    const state = updateStatus();
+    const lastCheckedAt = state.state === "available" ? state.lastCheckedAt : Date.now();
+
+    setUpdateStatus({
+      state: "downloading",
+      lastCheckedAt,
+      version: pending.version,
+      totalBytes: null,
+      downloadedBytes: 0,
+      notes: pending.notes,
+    });
+
+    try {
+      await pending.update.download((event: any) => {
+        if (!event || typeof event !== "object") return;
+        const record = event as Record<string, any>;
+
+        setUpdateStatus((current) => {
+          if (current.state !== "downloading") return current;
+
+          if (record.event === "Started") {
+            const total = record.data && typeof record.data.contentLength === "number" ? record.data.contentLength : null;
+            return { ...current, totalBytes: total };
+          }
+
+          if (record.event === "Progress") {
+            const chunk = record.data && typeof record.data.chunkLength === "number" ? record.data.chunkLength : 0;
+            return { ...current, downloadedBytes: current.downloadedBytes + chunk };
+          }
+
+          return current;
+        });
+      });
+
+      setUpdateStatus({
+        state: "ready",
+        lastCheckedAt,
+        version: pending.version,
+        notes: pending.notes,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : safeStringify(e);
+      setUpdateStatus({ state: "error", lastCheckedAt, message });
+    }
+  }
+
+  async function installUpdateAndRestart() {
+    const pending = pendingUpdate();
+    if (!pending) return;
+
+    if (anyActiveRuns()) {
+      setError("Stop active runs before installing an update.");
+      return;
+    }
+
+    setError(null);
+    try {
+      await pending.update.install();
+      await pending.update.close();
+      await relaunch();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : safeStringify(e);
+      setUpdateStatus({ state: "error", lastCheckedAt: null, message });
     }
   }
 
@@ -1192,8 +1374,48 @@ export default function App() {
             setTemplates(parsed as Template[]);
           }
         }
+
+        const storedUpdateChannel = window.localStorage.getItem("openwork.updateChannel");
+        if (storedUpdateChannel === "stable" || storedUpdateChannel === "beta") {
+          setUpdateChannel(storedUpdateChannel);
+        }
+
+        const storedUpdateAutoCheck = window.localStorage.getItem("openwork.updateAutoCheck");
+        if (storedUpdateAutoCheck === "0" || storedUpdateAutoCheck === "1") {
+          setUpdateAutoCheck(storedUpdateAutoCheck === "1");
+        }
+
+        const storedUpdateCheckedAt = window.localStorage.getItem("openwork.updateLastCheckedAt");
+        if (storedUpdateCheckedAt) {
+          const parsed = Number(storedUpdateCheckedAt);
+          if (Number.isFinite(parsed) && parsed > 0) {
+            setUpdateStatus({ state: "idle", lastCheckedAt: parsed });
+          }
+        }
       } catch {
         // ignore
+      }
+    }
+
+    if (isTauriRuntime()) {
+      try {
+        setAppVersion(await getVersion());
+      } catch {
+        // ignore
+      }
+
+      try {
+        setUpdateEnv(await updaterEnvironment());
+      } catch {
+        // ignore
+      }
+
+      if (updateAutoCheck()) {
+        const state = updateStatus();
+        const lastCheckedAt = state.state === "idle" ? state.lastCheckedAt : null;
+        if (!lastCheckedAt || Date.now() - lastCheckedAt > 24 * 60 * 60_000) {
+          checkForUpdates({ quiet: true }).catch(() => undefined);
+        }
       }
     }
 
@@ -1298,6 +1520,36 @@ export default function App() {
       window.localStorage.setItem("openwork.templates", JSON.stringify(templates()));
     } catch {
       // ignore
+    }
+  });
+
+  createEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("openwork.updateChannel", updateChannel());
+    } catch {
+      // ignore
+    }
+  });
+
+  createEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("openwork.updateAutoCheck", updateAutoCheck() ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  });
+
+  createEffect(() => {
+    const state = updateStatus();
+    if (typeof window === "undefined") return;
+    if (state.state === "idle" && state.lastCheckedAt) {
+      try {
+        window.localStorage.setItem("openwork.updateLastCheckedAt", String(state.lastCheckedAt));
+      } catch {
+        // ignore
+      }
     }
   });
 
@@ -2506,6 +2758,179 @@ export default function App() {
                   </Button>
                 </Show>
               </div>
+            </div>
+
+            <div class="bg-zinc-900/30 border border-zinc-800/50 rounded-2xl p-5 space-y-3">
+              <div class="flex items-start justify-between gap-4">
+                <div>
+                  <div class="text-sm font-medium text-white">Updates</div>
+                  <div class="text-xs text-zinc-500">Keep OpenWork up to date.</div>
+                </div>
+                <div class="text-xs text-zinc-600 font-mono">{appVersion() ? `v${appVersion()}` : ""}</div>
+              </div>
+
+              <Show
+                when={!isTauriRuntime()}
+                fallback={
+                  <Show
+                    when={updateEnv() && !updateEnv()!.supported}
+                    fallback={
+                      <>
+                        <div class="flex items-center justify-between bg-zinc-950 p-3 rounded-xl border border-zinc-800">
+                          <div class="space-y-0.5">
+                            <div class="text-sm text-white">Channel</div>
+                            <div class="text-xs text-zinc-600">{updateChannel() === "stable" ? "Stable" : "Beta"}</div>
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <button
+                              class={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                                updateChannel() === "stable"
+                                  ? "bg-white/10 text-white border-white/20"
+                                  : "text-zinc-500 border-zinc-800 hover:text-white"
+                              }`}
+                              onClick={() => {
+                                setUpdateChannel("stable");
+                                setPendingUpdate(null);
+                                const s = updateStatus();
+                                if (s.state !== "idle") {
+                                  setUpdateStatus({ state: "idle", lastCheckedAt: null });
+                                }
+                              }}
+                            >
+                              Stable
+                            </button>
+                            <button
+                              class={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                                updateChannel() === "beta"
+                                  ? "bg-white/10 text-white border-white/20"
+                                  : "text-zinc-500 border-zinc-800 hover:text-white"
+                              }`}
+                              onClick={() => {
+                                setUpdateChannel("beta");
+                                setPendingUpdate(null);
+                                const s = updateStatus();
+                                if (s.state !== "idle") {
+                                  setUpdateStatus({ state: "idle", lastCheckedAt: null });
+                                }
+                              }}
+                            >
+                              Beta
+                            </button>
+                          </div>
+                        </div>
+
+                        <div class="flex items-center justify-between bg-zinc-950 p-3 rounded-xl border border-zinc-800">
+                          <div class="space-y-0.5">
+                            <div class="text-sm text-white">Automatic checks</div>
+                            <div class="text-xs text-zinc-600">Once per day (quiet)</div>
+                          </div>
+                          <button
+                            class={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                              updateAutoCheck()
+                                ? "bg-white/10 text-white border-white/20"
+                                : "text-zinc-500 border-zinc-800 hover:text-white"
+                            }`}
+                            onClick={() => setUpdateAutoCheck((v) => !v)}
+                          >
+                            {updateAutoCheck() ? "On" : "Off"}
+                          </button>
+                        </div>
+
+                        <div class="flex items-center justify-between gap-3 bg-zinc-950 p-3 rounded-xl border border-zinc-800">
+                          <div class="space-y-0.5">
+                            <div class="text-sm text-white">
+                              <Switch>
+                                <Match when={updateStatus().state === "checking"}>Checking…</Match>
+                                <Match when={updateStatus().state === "available"}>
+                                  Update available: v{(updateStatus() as any).version}
+                                </Match>
+                                <Match when={updateStatus().state === "downloading"}>Downloading…</Match>
+                                <Match when={updateStatus().state === "ready"}>
+                                  Ready to install: v{(updateStatus() as any).version}
+                                </Match>
+                                <Match when={updateStatus().state === "error"}>Update check failed</Match>
+                                <Match when={true}>Up to date</Match>
+                              </Switch>
+                            </div>
+                            <Show
+                              when={
+                                updateStatus().state === "idle" &&
+                                (updateStatus() as { state: "idle"; lastCheckedAt: number | null }).lastCheckedAt
+                              }
+                            >
+                              <div class="text-xs text-zinc-600">
+                                Last checked {formatRelativeTime((updateStatus() as { state: "idle"; lastCheckedAt: number | null }).lastCheckedAt!)}
+                              </div>
+                            </Show>
+                            <Show when={updateStatus().state === "available" && (updateStatus() as any).date}>
+                              <div class="text-xs text-zinc-600">Published {(updateStatus() as any).date}</div>
+                            </Show>
+                            <Show when={updateStatus().state === "downloading"}>
+                              <div class="text-xs text-zinc-600">
+                                {formatBytes((updateStatus() as any).downloadedBytes)}
+                                <Show when={(updateStatus() as any).totalBytes != null}>
+                                  {` / ${formatBytes((updateStatus() as any).totalBytes)}`}
+                                </Show>
+                              </div>
+                            </Show>
+                            <Show when={updateStatus().state === "error"}>
+                              <div class="text-xs text-red-300">{(updateStatus() as any).message}</div>
+                            </Show>
+                          </div>
+
+                          <div class="flex items-center gap-2">
+                            <Button
+                              variant="outline"
+                              class="text-xs h-8 py-0 px-3"
+                              onClick={() => checkForUpdates()}
+                              disabled={busy() || updateStatus().state === "checking" || updateStatus().state === "downloading"}
+                            >
+                              Check
+                            </Button>
+
+                            <Show when={updateStatus().state === "available"}>
+                              <Button
+                                variant="secondary"
+                                class="text-xs h-8 py-0 px-3"
+                                onClick={() => downloadUpdate()}
+                                disabled={busy() || updateStatus().state === "downloading"}
+                              >
+                                Download
+                              </Button>
+                            </Show>
+
+                            <Show when={updateStatus().state === "ready"}>
+                              <Button
+                                variant="secondary"
+                                class="text-xs h-8 py-0 px-3"
+                                onClick={() => installUpdateAndRestart()}
+                                disabled={busy() || anyActiveRuns()}
+                                title={anyActiveRuns() ? "Stop active runs to update" : ""}
+                              >
+                                Install & Restart
+                              </Button>
+                            </Show>
+                          </div>
+                        </div>
+
+                        <Show when={updateStatus().state === "available" && (updateStatus() as any).notes}>
+                          <div class="rounded-xl bg-black/20 border border-zinc-800 p-3 text-xs text-zinc-400 whitespace-pre-wrap max-h-40 overflow-auto">
+                            {(updateStatus() as any).notes}
+                          </div>
+                        </Show>
+                      </>
+                    }
+                  >
+                    <div class="rounded-xl bg-black/20 border border-zinc-800 p-3 text-sm text-zinc-400">
+                      {updateEnv()?.reason ?? "Updates are not supported in this environment."}
+                    </div>
+                  </Show>
+                }
+              >
+                <div class="rounded-xl bg-black/20 border border-zinc-800 p-3 text-sm text-zinc-400">
+                  Updates are only available in the desktop app.
+                </div>
+              </Show>
             </div>
 
             <div class="bg-zinc-900/30 border border-zinc-800/50 rounded-2xl p-5 space-y-3">

@@ -52,6 +52,15 @@ pub struct OpencodeConfigFile {
   pub content: Option<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdaterEnvironment {
+  pub supported: bool,
+  pub reason: Option<String>,
+  pub executable_path: Option<String>,
+  pub app_bundle_path: Option<String>,
+}
+
 fn find_free_port() -> Result<u16, String> {
   let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
   let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -106,6 +115,55 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
   }
 
   Ok(())
+}
+
+fn is_mac_dmg_or_translocated(path: &Path) -> bool {
+  let path_str = path.to_string_lossy();
+  path_str.contains("/Volumes/") || path_str.contains("AppTranslocation")
+}
+
+#[tauri::command]
+fn updater_environment(_app: tauri::AppHandle) -> UpdaterEnvironment {
+  let executable_path = std::env::current_exe().ok();
+
+  let app_bundle_path = executable_path
+    .as_ref()
+    .and_then(|exe| exe.parent())
+    .and_then(|p| p.parent())
+    .and_then(|p| p.parent())
+    .map(|p| p.to_path_buf());
+
+  let mut supported = true;
+  let mut reason: Option<String> = None;
+
+  if let Some(exe) = executable_path.as_ref() {
+    if is_mac_dmg_or_translocated(exe) {
+      supported = false;
+      reason = Some(
+        "OpenWork is running from a mounted disk image. Install it to Applications to enable updates."
+          .to_string(),
+      );
+    }
+  }
+
+  if supported {
+    if let Some(bundle) = app_bundle_path.as_ref() {
+      if is_mac_dmg_or_translocated(bundle) {
+        supported = false;
+        reason = Some(
+          "OpenWork is running from a mounted disk image. Install it to Applications to enable updates."
+            .to_string(),
+        );
+      }
+    }
+  }
+
+  UpdaterEnvironment {
+    supported,
+    reason,
+    executable_path: executable_path.map(|p| p.to_string_lossy().to_string()),
+    app_bundle_path: app_bundle_path.map(|p| p.to_string_lossy().to_string()),
+  }
 }
 
 fn resolve_opencode_config_path(scope: &str, project_dir: &str) -> Result<PathBuf, String> {
@@ -390,6 +448,10 @@ fn write_opencode_config(
 pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
+    #[cfg(desktop)]
+    .plugin(tauri_plugin_process::init())
+    #[cfg(desktop)]
+    .plugin(tauri_plugin_updater::Builder::new().build())
     .manage(EngineManager::default())
     .invoke_handler(tauri::generate_handler![
       engine_start,
@@ -398,7 +460,8 @@ pub fn run() {
       opkg_install,
       import_skill,
       read_opencode_config,
-      write_opencode_config
+      write_opencode_config,
+      updater_environment
     ])
     .run(tauri::generate_context!())
     .expect("error while running OpenWork");
