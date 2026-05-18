@@ -625,6 +625,15 @@ export function SessionRoute() {
         }),
     [sessionsByWorkspaceId],
   );
+  const activeSelectedWorkspaceSessionIds = useMemo(
+    () =>
+      (sessionsByWorkspaceId[selectedWorkspaceId] ?? []).flatMap((session: any) => {
+        if (!isActiveSessionStatus(getSessionStatus(session))) return [];
+        const id = String(session?.id ?? "").trim();
+        return id ? [id] : [];
+      }),
+    [selectedWorkspaceId, sessionsByWorkspaceId],
+  );
 
   const backgroundSessionLoadInFlight = useRef<Map<string, number>>(new Map());
   const rememberPendingCreatedSession = useCallback((workspaceId: string, sessionId: string) => {
@@ -887,7 +896,7 @@ export function SessionRoute() {
       // OpenCode engine bound to it re-reads opencode.jsonc and applies
       // permissions. Fire-and-forget; the route is idempotent and any
       // transport failure is non-fatal. See issue #870.
-      if (nextWorkspaceId && !launchActivatedWorkspaceIdsRef.current.has(nextWorkspaceId)) {
+      if (nextWorkspaceId && list.activeId !== nextWorkspaceId && !launchActivatedWorkspaceIdsRef.current.has(nextWorkspaceId)) {
         launchActivatedWorkspaceIdsRef.current.add(nextWorkspaceId);
         const nextWorkspace = nextWorkspaces.find((workspace) => workspace.id === nextWorkspaceId) ?? null;
         const nextEndpoint = endpointForWorkspace(nextWorkspace);
@@ -1826,7 +1835,7 @@ export function SessionRoute() {
       onSendDraft: async (draft: ComposerDraft) => {
         const text = (draft.resolvedText ?? draft.text).trim();
         if (!text && draft.attachments.length === 0) return;
-        if (selectedModelUnavailable) return;
+        if (selectedModelUnavailable) throw new Error("Selected model is unavailable. Choose another model before sending.");
 
         if (draft.mode === "shell") {
           await shellInSession(opencodeClient, selectedSessionId, text);
@@ -2469,6 +2478,7 @@ export function SessionRoute() {
         // the UI never sees them and gets stuck on "thinking".
         workspaceId={selectedWorkspaceEndpoint.workspaceId}
         sessionId={selectedSessionId}
+        activeSessionIds={activeSelectedWorkspaceSessionIds}
         opencodeBaseUrl={opencodeBaseUrl}
         openworkToken={selectedWorkspaceServerToken}
       />
