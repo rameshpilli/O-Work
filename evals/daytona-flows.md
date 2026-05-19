@@ -191,6 +191,148 @@ Returns path to a PNG file. Verify it's not empty.
 
 ---
 
+## Flow 4: Connect OpenAI via UI and run GPT-5.5
+
+**Goal:** Prove provider key setup works through the Electron UI, not by editing
+`opencode.jsonc` directly.
+
+### Source references for controls
+
+Use these files to choose stable selectors before guessing DOM structure:
+
+| UI control | Preferred selector | Source file |
+|---|---|---|
+| Settings button | `button[aria-label="Settings"]` | `apps/app/src/react-app/domains/session/chat/status-bar.tsx` |
+| AI Providers tab | button text `AI Providers` | `apps/app/src/react-app/domains/settings/shell/settings-page.tsx`, `settings-route.tsx` |
+| Connect provider | button text `Connect provider` | `apps/app/src/react-app/domains/settings/pages/ai-view.tsx` |
+| Provider search | `input[placeholder="Filter providers by name or ID"]` | `apps/app/src/react-app/domains/connections/provider-auth/provider-auth-modal.tsx` |
+| OpenAI provider row | button containing `OpenAI` and `openai` | `provider-auth-modal.tsx` |
+| Manual key method | button containing `Manually enter API Key` | `provider-auth-modal.tsx` |
+| API key input | `input[type="password"][placeholder="sk-..."]` | `provider-auth-modal.tsx` |
+| Save key | button text `Save key` | `provider-auth-modal.tsx` |
+| New task/session | `button[aria-label="New task"]` | `apps/app/src/react-app/domains/session/sidebar/app-sidebar.tsx` |
+| Composer | `[contenteditable="true"][data-lexical-editor="true"]` | `apps/app/src/react-app/domains/session/surface/composer/editor.tsx` and `composer.tsx` |
+| Run task | button text `Run task` | `apps/app/src/react-app/domains/session/surface/composer/composer.tsx` |
+| Model selector | `button[aria-label="Change model"]` | `composer.tsx` |
+| Model picker rows | button text containing model display name/id | model picker rendered from session route state |
+
+### Selector helpers
+
+Prefer text and ARIA selectors over React internals. Use React fiber only for
+native file-picker state injection during workspace creation.
+
+Click by exact text:
+
+```js
+(function clickText(text) {
+  var el = Array.from(document.querySelectorAll('button')).find(function (node) {
+    return node.textContent.trim() === text && !node.disabled;
+  });
+  if (!el) return 'not found: ' + text;
+  el.click();
+  return 'clicked: ' + text;
+})('AI Providers')
+```
+
+Click by ARIA label:
+
+```js
+(function clickAria(label) {
+  var el = Array.from(document.querySelectorAll('button,a')).find(function (node) {
+    return node.getAttribute('aria-label') === label && !node.disabled;
+  });
+  if (!el) return 'not found: ' + label;
+  el.click();
+  return 'clicked: ' + label;
+})('Settings')
+```
+
+Set React-controlled inputs:
+
+```js
+(function setInput(selector, value) {
+  var input = document.querySelector(selector);
+  if (!input) return 'not found: ' + selector;
+  var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  setter.call(input, value);
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+  return 'set: ' + selector;
+})('input[placeholder="Filter providers by name or ID"]', 'openai')
+```
+
+Paste into the Lexical composer:
+
+```js
+(function pasteComposer(text) {
+  var editor = document.querySelector('[contenteditable="true"][data-lexical-editor="true"]');
+  if (!editor) return 'no editor';
+  editor.focus();
+  var data = new DataTransfer();
+  data.setData('text/plain', text);
+  editor.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+  return editor.innerText;
+})('Reply with exactly: Daytona UI key OK')
+```
+
+`document.execCommand('insertText')` may no-op in Electron/CDP for this Lexical
+editor. The synthetic paste event is the reliable path.
+
+### Steps
+
+1. Create a workspace using Flow 1.
+
+2. Open Settings:
+   ```js
+   (function(){var el=Array.from(document.querySelectorAll('button,a')).find(function(n){return n.getAttribute('aria-label')==='Settings'}); if(!el)return 'not found'; el.click(); return 'clicked';})()
+   ```
+
+3. Open AI Providers:
+   ```js
+   (function(){var b=Array.from(document.querySelectorAll('button')).find(function(n){return n.textContent.trim()==='AI Providers'}); if(!b)return 'not found'; b.click(); return 'clicked';})()
+   ```
+
+4. Click `Connect provider`.
+
+5. Search for `openai` using `input[placeholder="Filter providers by name or ID"]`.
+
+6. Click the provider row containing `OpenAI`, then click `Manually enter API Key`.
+
+7. Fill the password input and click `Save key`:
+   ```js
+   (function(key){
+     var input=document.querySelector('input[type="password"][placeholder="sk-..."]');
+     if(!input)return 'no key input';
+     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,key);
+     input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:key}));
+     var save=Array.from(document.querySelectorAll('button')).find(function(b){return b.textContent.trim()==='Save key' && !b.disabled});
+     if(!save)return 'save disabled';
+     save.click();
+     return 'submitted';
+   })('sk-...')
+   ```
+
+8. Verify AI Providers shows OpenAI as connected. Expected text includes:
+   `2 providers connected`, `OpenAI`, and `Disconnect`.
+
+9. Click `Pick a new default?`, open `OpenAI`, select `Default model`, then click
+   `GPT-5.5gpt-5.5`. The composer should show `GPT-5.5`.
+
+10. Click `Back to app`, then `button[aria-label="New task"]`.
+
+11. Paste into the composer using the `pasteComposer` helper and click `Run task`.
+
+12. Verify the response contains `Daytona UI key OK` and session messages show
+    `providerID: openai`, `modelID: gpt-5.5`, `variant: medium`.
+
+### Expected outcome
+
+- OpenAI appears as a connected provider in Settings.
+- The model selector shows `GPT-5.5`.
+- The session assistant response is successful, not `ProviderAuthError`.
+- No API key is committed or written into repo docs.
+
+---
+
 ## Teardown
 
 ```bash

@@ -41,7 +41,7 @@ daytona create \
 
 echo ""
 echo "==> Checking out $REF and installing deps..."
-daytona exec "$SANDBOX" -- "bash -lc 'cd /workspace && git fetch origin $REF && git checkout $REF && pnpm install --frozen-lockfile || pnpm install'"
+daytona exec "$SANDBOX" -- "bash -lc 'cd /workspace && (git fetch origin $REF || git fetch origin dev --depth 50 || true) && git checkout $REF && (CI=1 pnpm install --frozen-lockfile || CI=1 pnpm install)'"
 
 echo ""
 echo "==> Starting XFCE/noVNC..."

@@ -174,6 +174,68 @@ The reducer uses `{ key, value }` actions. NOT direct state replacement.
    - Status bar shows "OpenWork Ready"
    - opencode process running: `daytona exec "$SANDBOX" -- "bash -lc 'ps aux | grep opencode | grep -v grep'"`
 
+## UI automation selector map
+
+Before guessing selectors, check the owning component. Prefer ARIA labels,
+button text, and input placeholders over brittle CSS classes. Use React fiber
+only when bypassing native file pickers.
+
+| Control | Stable selector/search | Source file |
+|---|---|---|
+| Settings button | `button[aria-label="Settings"]` | `apps/app/src/react-app/domains/session/chat/status-bar.tsx` |
+| Back to app | button text `Back to app` | `apps/app/src/react-app/domains/settings/shell/settings-shell.tsx` |
+| New task | `button[aria-label="New task"]` | `apps/app/src/react-app/domains/session/sidebar/app-sidebar.tsx` |
+| Run task | button text `Run task` | `apps/app/src/react-app/domains/session/surface/composer/composer.tsx` |
+| Model selector | `button[aria-label="Change model"]` | `apps/app/src/react-app/domains/session/surface/composer/composer.tsx` |
+| Composer editor | `[contenteditable="true"][data-lexical-editor="true"]` | `apps/app/src/react-app/domains/session/surface/composer/editor.tsx` |
+| AI Providers tab | button text `AI Providers` | `apps/app/src/react-app/domains/settings/shell/settings-page.tsx` |
+| Connect provider | button text `Connect provider` | `apps/app/src/react-app/domains/settings/pages/ai-view.tsx` |
+| Provider search | `input[placeholder="Filter providers by name or ID"]` | `apps/app/src/react-app/domains/connections/provider-auth/provider-auth-modal.tsx` |
+| Manual key option | button containing `Manually enter API Key` | `provider-auth-modal.tsx` |
+| API key input | `input[type="password"][placeholder="sk-..."]` | `provider-auth-modal.tsx` |
+| Save key | button text `Save key` | `provider-auth-modal.tsx` |
+
+Reusable click helpers:
+
+```js
+// Click exact button text.
+(function(text) { var b = Array.from(document.querySelectorAll('button')).find(function(el) { return el.textContent.trim() === text && !el.disabled; }); if (!b) return 'not found: ' + text; b.click(); return 'clicked: ' + text; })('AI Providers')
+```
+
+```js
+// Click an ARIA-labeled button/link.
+(function(label) { var el = Array.from(document.querySelectorAll('button,a')).find(function(node) { return node.getAttribute('aria-label') === label && !node.disabled; }); if (!el) return 'not found: ' + label; el.click(); return 'clicked: ' + label; })('Settings')
+```
+
+```js
+// Set a React-controlled input.
+(function(selector, value) { var input = document.querySelector(selector); if (!input) return 'not found: ' + selector; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value); input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); return 'set: ' + selector; })('input[placeholder="Filter providers by name or ID"]', 'openai')
+```
+
+```js
+// Paste text into the Lexical composer. Prefer this over execCommand in Electron/CDP.
+(function(text) { var editor = document.querySelector('[contenteditable="true"][data-lexical-editor="true"]'); if (!editor) return 'no editor'; editor.focus(); var data = new DataTransfer(); data.setData('text/plain', text); editor.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data })); return editor.innerText; })('Reply with exactly: Daytona UI key OK')
+```
+
+## Connect OpenAI through the UI
+
+Use this when the user provides a temporary key and asks to test real model
+sessions. Do not write the key into docs or repo files.
+
+1. Open Settings using `button[aria-label="Settings"]`.
+2. Click `AI Providers`.
+3. Click `Connect provider`.
+4. Set `input[placeholder="Filter providers by name or ID"]` to `openai`.
+5. Click the provider row containing `OpenAI` and `openai`.
+6. Click `Manually enter API Key`.
+7. Set `input[type="password"][placeholder="sk-..."]` to the key.
+8. Click `Save key`.
+9. Verify text includes `2 providers connected`, `OpenAI`, and `Disconnect`.
+10. Click `Pick a new default?`, expand `OpenAI`, select `Default model`, and click `GPT-5.5gpt-5.5`.
+11. Return to app, create a session, paste a prompt into the composer, and click `Run task`.
+
+Expected successful session message metadata: provider `openai`, model `gpt-5.5`, variant `medium`.
+
 ## Session interaction
 
 ### Prerequisites: API key for real LLM sessions
