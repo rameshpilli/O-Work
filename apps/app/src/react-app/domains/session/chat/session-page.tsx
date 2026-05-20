@@ -2,7 +2,7 @@
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePanelRef } from "react-resizable-panels";
-import { FileText, Globe, Zap } from "lucide-react";
+import { FileText, Globe, Settings2, Zap } from "lucide-react";
 
 import { t } from "../../../../i18n";
 import { type OpenworkServerClient, type OpenworkServerStatus } from "../../../../app/lib/openwork-server";
@@ -153,6 +153,8 @@ export type SessionPageProps = {
   onRenameSession?: (sessionId: string, title: string) => Promise<void> | void;
   onDeleteSession?: (sessionId: string) => Promise<void> | void;
   onAccessibleTargetsChange?: (targets: OpenTarget[]) => void;
+  /** Settings content rendered inside the right pane when the settings rail icon is active. */
+  settingsSlot?: React.ReactNode;
 };
 
 function getSidebarInitialLoading(props: SessionPageSidebarProps) {
@@ -219,7 +221,7 @@ export function SessionPage(props: SessionPageProps) {
   const browserPanelOpen = useUiStateStore((state) => state.browserPanelOpen);
   const openBrowserPanel = useUiStateStore((state) => state.openBrowserPanel);
   const closeBrowserPanel = useUiStateStore((state) => state.closeBrowserPanel);
-  const [rightPaneMode, setRightPaneMode] = useState<"browser" | "artifact">("browser");
+  const [rightPaneMode, setRightPaneMode] = useState<"browser" | "artifact" | "settings">("browser");
   const [artifactTarget, setArtifactTarget] = useState<OpenTarget | null>(null);
   const [openTargets, setOpenTargets] = useState<OpenTarget[]>([]);
   const [hiddenAccessibleTargetIds, setHiddenAccessibleTargetIds] = useState<Set<string>>(() => new Set());
@@ -234,6 +236,7 @@ export function SessionPage(props: SessionPageProps) {
   const hasArtifactTargets = artifactTargetCount > 0;
   const browserRailActive = browserPanelOpen && rightPaneMode === "browser";
   const artifactRailActive = browserPanelOpen && rightPaneMode === "artifact";
+  const settingsRailActive = browserPanelOpen && rightPaneMode === "settings";
 
   useReactRenderWatchdog("SessionPage", {
     selectedSessionId: props.selectedSessionId,
@@ -362,6 +365,14 @@ export function SessionPage(props: SessionPageProps) {
     preserveRightPaneModeOnPanelOpenRef.current = true;
     openBrowserPanel();
   }, [artifactRailActive, closeBrowserPanel, hasArtifactTargets, openBrowserPanel]);
+  const openSettingsRailPane = useCallback(() => {
+    if (settingsRailActive) {
+      closeBrowserPanel();
+      return;
+    }
+    setRightPaneMode("settings");
+    openBrowserPanel();
+  }, [closeBrowserPanel, openBrowserPanel, settingsRailActive]);
   const removeAccessibleTarget = useCallback((target: OpenTarget) => {
     setHiddenAccessibleTargetIds((current) => new Set(current).add(target.id));
     setArtifactTarget((current) => current?.id === target.id ? null : current);
@@ -369,7 +380,9 @@ export function SessionPage(props: SessionPageProps) {
   useEffect(() => {
     const open = (event: Event) => {
       const requested = (event as CustomEvent<OpenTarget>).detail;
-      const target = accessibleTargets.find((item) => item.id === requested?.id || item.value === requested?.value);
+      const target = accessibleTargets.find((item) => item.id === requested?.id || item.value === requested?.value) ?? (
+        requested?.kind && requested?.value ? requested : null
+      );
       if (target) openTarget(target);
     };
     const hide = (event: Event) => {
@@ -384,6 +397,11 @@ export function SessionPage(props: SessionPageProps) {
       window.removeEventListener("openwork-hide-accessible-target", hide);
     };
   }, [accessibleTargets, openTarget, removeAccessibleTarget]);
+  useEffect(() => {
+    const handler = () => closeBrowserPanel();
+    window.addEventListener("openwork-close-right-pane", handler);
+    return () => window.removeEventListener("openwork-close-right-pane", handler);
+  }, [closeBrowserPanel]);
   const [showDelayedSessionLoadingState, setShowDelayedSessionLoadingState] = useState(false);
 
   const selectedSessionTitle = useMemo(
@@ -805,17 +823,21 @@ export function SessionPage(props: SessionPageProps) {
           ) : null}
               </main>
             </ResizablePanel>
-            {browserPanelOpen ? (
+              {browserPanelOpen ? (
               <>
                 <ResizableHandle withHandle className="hidden lg:flex" />
                 <ResizablePanel
                   panelRef={browserPanelRef}
-                  defaultSize={`${browserPanelDefaultWidth}px`}
-                  minSize="320px"
+                  defaultSize={`${rightPaneMode === "settings" ? Math.max(browserPanelDefaultWidth, 480) : browserPanelDefaultWidth}px`}
+                  minSize={rightPaneMode === "settings" ? "420px" : "320px"}
                   maxSize="70%"
                   className="min-h-0 overflow-hidden lg:flex lg:flex-col"
                 >
-                  {rightPaneMode === "artifact" && visibleArtifactTarget && props.openworkServerClient && props.runtimeWorkspaceId ? (
+                  {rightPaneMode === "settings" && props.settingsSlot ? (
+                    <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
+                      {props.settingsSlot}
+                    </div>
+                  ) : rightPaneMode === "artifact" && visibleArtifactTarget && props.openworkServerClient && props.runtimeWorkspaceId ? (
                     <ArtifactPanel
                       client={props.openworkServerClient}
                       workspaceId={props.runtimeWorkspaceId}
@@ -869,6 +891,20 @@ export function SessionPage(props: SessionPageProps) {
                   {artifactTargetCount > 9 ? "9+" : artifactTargetCount}
                 </span>
               ) : null}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className={cn(
+                "rounded-xl transition-colors hover:bg-muted hover:text-foreground",
+                settingsRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+              )}
+              onClick={props.settingsSlot ? openSettingsRailPane : props.onOpenSettings}
+              title="Settings"
+              aria-label="Settings"
+              aria-pressed={settingsRailActive}
+            >
+              <Settings2 size={17} />
             </Button>
           </aside>
           </div>

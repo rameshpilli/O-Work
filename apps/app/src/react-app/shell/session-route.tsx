@@ -136,6 +136,10 @@ import { useSessionControlActions } from "../domains/session/control/session-con
 import { legacySessionRoute, workspaceSessionRoute, workspaceSettingsRoute } from "./workspace-routes";
 import { WorkspaceProvider } from "./workspace-provider";
 import type { OpenTarget } from "../domains/session/artifacts/open-target";
+import { Button } from "@/components/ui/button";
+import { SettingsPane, type SettingsPaneTab } from "../domains/session/settings/settings-pane";
+import { AuthorizedFoldersPanel } from "../domains/settings/panels/authorized-folders-panel";
+import { ExtensionsPaneSlot } from "../domains/session/settings/extensions-pane-slot";
 import {
   ensureProviderListQuery,
   getConnectedProviderItems,
@@ -516,11 +520,12 @@ export function SessionRoute() {
   const [renameWorkspaceBusy, setRenameWorkspaceBusy] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [paletteAccessibleTargets, setPaletteAccessibleTargets] = useState<OpenTarget[]>([]);
+  const [settingsPaneTab, setSettingsPaneTab] = useState<SettingsPaneTab>("extensions");
   // Model picker modal state (ported from settings-route; previously the
   // session "Pick a model" button navigated to /settings/general, which is a
   // dead-end). Loads providers lazily when the modal opens.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [modelPickerInitialTab, setModelPickerInitialTab] = useState<"default" | "available">("default");
+  // initialTab removed — model picker no longer has tabs
   const [compactModelPickerOpen, setCompactModelPickerOpen] = useState(false);
   const [modelPickerQuery, setModelPickerQuery] = useState("");
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
@@ -550,7 +555,6 @@ export function SessionRoute() {
       if (ids && ids.length > 0) {
         setRecentProviderIds(new Set(ids));
       }
-      setModelPickerInitialTab(detail?.initialTab ?? "default");
       setModelPickerOpen(true);
     };
     window.addEventListener(openModelPickerEvent, handler);
@@ -567,7 +571,6 @@ export function SessionRoute() {
       if (Array.isArray(ids) && ids.every((id) => typeof id === "string")) {
         setRecentProviderIds(new Set(ids));
       }
-      setModelPickerInitialTab(parsed?.initialTab === "available" ? "available" : "default");
       setModelPickerOpen(true);
     } catch {
       window.localStorage.removeItem(pendingModelPickerProviderIdsKey);
@@ -2549,6 +2552,84 @@ export function SessionRoute() {
         );
       }}
       onOpenSettings={() => handleOpenSettings("/settings/general")}
+      settingsSlot={
+        <SettingsPane
+          activeTab={settingsPaneTab}
+          onTabChange={setSettingsPaneTab}
+          onClose={() => {
+            try {
+              window.dispatchEvent(new CustomEvent("openwork-close-right-pane"));
+            } catch {
+              // ignore
+            }
+          }}
+          onOpenFullSettings={(path) => handleOpenSettings(path)}
+          extensionsSlot={
+            <ExtensionsPaneSlot
+              openworkClient={client}
+              workspaceClient={selectedWorkspaceEndpoint?.client ?? client}
+              workspaceId={selectedWorkspaceEndpoint?.workspaceId ?? null}
+              providers={providers}
+              providerConnectedIds={providerConnectedIds}
+              onReloadRequired={(reason, trigger) => reloadCoordinator.markReloadRequired(reason as any, trigger as any)}
+              onRefreshProviders={() => refreshProviderListQueries(getReactQueryClient())}
+              onSetDefaultModel={(providerId, modelId) => {
+                local.setPrefs((prev) => ({ ...prev, defaultModel: { providerID: providerId, modelID: modelId }, modelVariant: null }));
+              }}
+            />
+          }
+          providersSlot={
+            <div className="space-y-4">
+              <div className="text-sm text-muted-foreground">
+                Connect AI model providers to use in your workspace.
+              </div>
+              <Button onClick={() => {
+                void sessionProviderAuthStore.openProviderAuthModal();
+              }}>
+                Connect a provider
+              </Button>
+              {providerConnectedIds.length > 0 ? (
+                <div className="space-y-1.5">
+                  <div className="text-xs font-medium text-foreground">Connected ({providerConnectedIds.length})</div>
+                  {providers.filter((p) => providerConnectedIds.includes(p.id)).map((provider) => (
+                    <div key={provider.id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs">
+                      <div className="size-2 rounded-full bg-green-9" />
+                      <span className="font-medium text-foreground">{provider.name || provider.id}</span>
+                      <span className="font-mono text-muted-foreground">{provider.id}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          }
+          permissionsSlot={
+            <AuthorizedFoldersPanel
+              openworkServerClient={selectedWorkspaceEndpoint?.client ?? client}
+              openworkServerStatus={selectedWorkspaceEndpoint?.client || client ? "connected" : "disconnected"}
+              openworkServerCapabilities={selectedWorkspaceEndpoint?.client || client
+                ? {
+                    config: { read: true, write: true },
+                    plugins: { read: true, write: true },
+                    skills: { read: true, write: true, source: "openwork" },
+                    mcp: { read: true, write: true },
+                    commands: { read: true, write: true },
+                  }
+                : null}
+              runtimeWorkspaceId={selectedWorkspaceEndpoint?.workspaceId ?? null}
+              selectedWorkspaceRoot={selectedWorkspaceRoot}
+              activeWorkspaceType={selectedWorkspace?.workspaceType ?? "local"}
+              onConfigUpdated={() => {
+                reloadCoordinator.markReloadRequired("config", {
+                  type: "config",
+                  name: "opencode.json",
+                  action: "updated",
+                });
+                void refreshRouteState();
+              }}
+            />
+          }
+        />
+      }
       sidebar={{
         workspaceSessionGroups,
         selectedWorkspaceId,
@@ -2798,7 +2879,7 @@ export function SessionRoute() {
     <ModelPickerModal
       open={modelPickerOpen}
       options={allowedModelOptions}
-      initialTab={modelPickerInitialTab}
+
       query={modelPickerQuery}
       setQuery={setModelPickerQuery}
       target="default"

@@ -36,6 +36,10 @@ import { createProviderAuthStore, useProviderAuthStoreSnapshot } from "../domain
 import ProviderAuthModal from "../domains/connections/provider-auth/provider-auth-modal";
 import ConnectionsModals from "../domains/connections/modals";
 import { AiSettingsView } from "../domains/settings/pages/ai-view";
+// Side-effect imports: register extension config components into the registry.
+import "../domains/settings/openai-image-gen-config";
+import "../domains/settings/ollama-config";
+import { getExtensionConfigSlot, type ExtensionConfigContext } from "../domains/settings/extension-registry";
 import { PreferencesView } from "../domains/settings/pages/preferences-view";
 import { ShellCustomizationView } from "../domains/settings/pages/shell-view";
 import { GeneralSettingsView } from "../domains/settings/pages/general-view";
@@ -66,6 +70,7 @@ import { createExtensionsStore, useExtensionsStoreSnapshot } from "../domains/se
 import { usePlatform } from "../kernel/platform";
 import { useLocal } from "../kernel/local-provider";
 import {
+  desktopFetch,
   openworkServerInfo,
   openworkServerRestart,
   engineStart,
@@ -122,6 +127,15 @@ import { workspaceSessionRoute, workspaceSettingsRoute } from "./workspace-route
 import { getReactQueryClient } from "../infra/query-client";
 import { ensureProviderListQuery, getConnectedProviderItems, refreshProviderListQueries } from "../domains/connections/provider-list-query";
 import { openModelPickerEvent, pendingModelPickerProviderIdsKey } from "./new-providers-toast";
+import {
+  IMAGE_GENERATION_EXTENSION_CONFIG_PATH,
+  IMAGE_GENERATION_PLUGIN_CONTENT,
+  IMAGE_GENERATION_PLUGIN_PATH,
+  OPENAI_IMAGE_MODEL,
+  openAiImageResponseToArrayBuffer,
+  slugifyImageArtifactName,
+} from "../domains/settings/openai-image-extension";
+import { OLLAMA_PROVIDER_CONFIG, type LocalProviderInstallInput } from "../domains/settings/openai-image-extension";
 
 type RouteWorkspace = OpenworkWorkspaceInfo & {
   displayNameResolved: string;
@@ -175,6 +189,26 @@ function describeWorkspaceCreateError(error: unknown) {
     return `${message}\n\nOpenWork could not read the workspace config before the filesystem timed out. This often happens when the folder is still syncing from iCloud Drive or another remote folder. Wait for the folder to finish downloading, move the workspace to a local folder, or try again.`;
   }
   return message;
+}
+
+async function requestOpenAiImage(input: { apiKey: string; prompt: string }) {
+  const response = await desktopFetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${input.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_IMAGE_MODEL,
+      prompt: input.prompt,
+    }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = payload?.error?.message || payload?.message || "OpenAI image generation failed.";
+    throw Object.assign(new Error(message), { payload, status: response.status, model: OPENAI_IMAGE_MODEL });
+  }
+  return payload;
 }
 
 function mergeRouteWorkspaces(
@@ -457,9 +491,19 @@ function SettingsRouteContent() {
   const [autoCompactContextBusy, setAutoCompactContextBusy] = useState(false);
   const [autoCompactContextLoaded, setAutoCompactContextLoaded] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [modelPickerInitialTab, setModelPickerInitialTab] = useState<"default" | "available">("default");
+  // initialTab removed — model picker no longer has tabs
   const [modelPickerQuery, setModelPickerQuery] = useState("");
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [localProviderBusy, setLocalProviderBusy] = useState(false);
+  const [localProviderStatus, setLocalProviderStatus] = useState<string | null>(null);
+  const [localProviderError, setLocalProviderError] = useState<string | null>(null);
+  const [imageExtensionInstalled, setImageExtensionInstalled] = useState(false);
+  const [imageExtensionBusy, setImageExtensionBusy] = useState(false);
+  const [imageExtensionStatus, setImageExtensionStatus] = useState<string | null>(null);
+  const [imageExtensionError, setImageExtensionError] = useState<string | null>(null);
+  const [imageGenerationBusy, setImageGenerationBusy] = useState(false);
+  const [imageGenerationStatus, setImageGenerationStatus] = useState<string | null>(null);
+  const [imageGenerationError, setImageGenerationError] = useState<string | null>(null);
   const emptyWorkspaceDisplay = useMemo<WorkspaceDisplay>(
     () => ({
       id: "",
@@ -802,6 +846,8 @@ function SettingsRouteContent() {
     [baseUrl, selectedWorkspace, token],
   );
   const opencodeBaseUrl = selectedWorkspaceEndpoint?.opencodeBaseUrl ?? "";
+  const runtimeWorkspaceId = selectedWorkspaceEndpoint?.workspaceId ?? selectedWorkspace?.id ?? null;
+  routeStateRef.current.runtimeWorkspaceId = runtimeWorkspaceId;
 
   const opencodeClient = useMemo(() => {
     if (!selectedWorkspaceEndpoint || !selectedWorkspaceEndpoint.token) return null;
@@ -820,10 +866,180 @@ function SettingsRouteContent() {
   }, [opencodeClient]);
 
   useEffect(() => {
+    const client = selectedWorkspaceEndpoint?.client ?? openworkClient;
+    const workspaceId = runtimeWorkspaceId?.trim() ?? "";
+    if (!client || !workspaceId) {
+      setImageExtensionInstalled(false);
+      return;
+    }
+
+    let cancelled = false;
+    void client.listPlugins(workspaceId, { includeGlobal: false })
+      .then((result) => {
+        if (cancelled) return;
+        setImageExtensionInstalled(
+          result.items.some((item) =>
+            item.spec.includes("openwork-image-generation") ||
+            item.path?.includes("openwork-image-generation") === true,
+          ),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setImageExtensionInstalled(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [openworkClient, runtimeWorkspaceId, selectedWorkspaceEndpoint]);
+
+  const installOpenAiImageExtension = useCallback(async (apiKey: string) => {
+    const workspaceClient = selectedWorkspaceEndpoint?.client ?? openworkClient;
+    const workspaceId = runtimeWorkspaceId?.trim() ?? "";
+    const resolvedApiKey = apiKey.trim();
+    if (!workspaceClient || !workspaceId) {
+      setImageExtensionError("OpenWork server is not connected for this workspace.");
+      return;
+    }
+    if (!resolvedApiKey) {
+      setImageExtensionError("OpenAI API key is required.");
+      return;
+    }
+
+    setImageExtensionBusy(true);
+    setImageExtensionStatus(null);
+    setImageExtensionError(null);
+    try {
+      const encoder = new TextEncoder();
+      await workspaceClient.writeWorkspaceBinaryFile(workspaceId, {
+        path: IMAGE_GENERATION_PLUGIN_PATH,
+        data: encoder.encode(IMAGE_GENERATION_PLUGIN_CONTENT).buffer,
+        force: true,
+      });
+      await workspaceClient.writeWorkspaceBinaryFile(workspaceId, {
+        path: IMAGE_GENERATION_EXTENSION_CONFIG_PATH,
+        data: encoder.encode(JSON.stringify({
+          id: "openai-image-generation",
+          name: "OpenAI Image Generation",
+          type: "openwork-extension",
+          model: OPENAI_IMAGE_MODEL,
+          apiKey: resolvedApiKey,
+          env: ["OPENAI_API_KEY"],
+        }, null, 2)).buffer,
+        force: true,
+      });
+      await workspaceClient.writeWorkspaceBinaryFile(workspaceId, {
+        path: ".opencode/package.json",
+        data: encoder.encode(JSON.stringify({ dependencies: { "@opencode-ai/plugin": "1.14.38" } }, null, 2)).buffer,
+        force: true,
+      });
+      // upsertUserEnv requires the host token; use openworkClient which carries it.
+      if (openworkClient) {
+        await openworkClient.upsertUserEnv([{ key: "OPENAI_API_KEY", value: resolvedApiKey }]);
+      }
+      reloadCoordinator.markReloadRequired("plugins", { type: "plugin", name: "openwork-image-generation", action: "added" });
+      setImageExtensionInstalled(true);
+      setImageExtensionStatus("Installed OpenAI image_generate and saved OPENAI_API_KEY through OpenWork environment variables.");
+    } catch (error) {
+      setImageExtensionError(describeRouteError(error));
+    } finally {
+      setImageExtensionBusy(false);
+    }
+  }, [openworkClient, reloadCoordinator, runtimeWorkspaceId, selectedWorkspaceEndpoint]);
+
+  const generateOpenAiTestImage = useCallback(async (input: { apiKey: string; prompt: string }) => {
+    const client = selectedWorkspaceEndpoint?.client ?? openworkClient;
+    const workspaceId = runtimeWorkspaceId?.trim() ?? "";
+    const apiKey = input.apiKey.trim();
+    const prompt = input.prompt.trim();
+    if (!client || !workspaceId) {
+      setImageGenerationError("OpenWork server is not connected for this workspace.");
+      return;
+    }
+    if (!apiKey) {
+      setImageGenerationError("OpenAI API key is required.");
+      return;
+    }
+    if (!prompt) {
+      setImageGenerationError("Prompt is required.");
+      return;
+    }
+
+    setImageGenerationBusy(true);
+    setImageGenerationStatus(null);
+    setImageGenerationError(null);
+    try {
+      const payload = await requestOpenAiImage({ apiKey, prompt });
+      const data = await openAiImageResponseToArrayBuffer(payload);
+      const fileName = `${slugifyImageArtifactName(prompt)}.png`;
+      await client.writeWorkspaceBinaryFile(workspaceId, { path: `artifacts/${fileName}`, data, force: true });
+      setImageGenerationStatus(`Generated artifacts/${fileName} with ${OPENAI_IMAGE_MODEL}.`);
+    } catch (error) {
+      setImageGenerationError(describeRouteError(error));
+    } finally {
+      setImageGenerationBusy(false);
+    }
+  }, [openworkClient, runtimeWorkspaceId, selectedWorkspaceEndpoint]);
+
+  const installLocalProvider = useCallback(async (input: LocalProviderInstallInput) => {
+    const client = selectedWorkspaceEndpoint?.client ?? openworkClient;
+    const workspaceId = runtimeWorkspaceId?.trim() ?? "";
+    const modelId = input.modelId.trim();
+    if (!client || !workspaceId) {
+      setLocalProviderError("OpenWork server is not connected for this workspace.");
+      return;
+    }
+    if (!modelId) {
+      setLocalProviderError("Model ID is required.");
+      return;
+    }
+
+    setLocalProviderBusy(true);
+    setLocalProviderStatus(null);
+    setLocalProviderError(null);
+    try {
+      await client.patchConfig(workspaceId, {
+        opencode: {
+          provider: {
+            [input.providerId]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: input.name,
+              options: { baseURL: input.baseURL },
+              models: { [modelId]: { name: input.modelName.trim() || modelId } },
+            },
+          },
+        },
+      });
+      if (input.setDefault) {
+        local.setPrefs((previous) => ({
+          ...previous,
+          defaultModel: { providerID: input.providerId, modelID: modelId },
+          modelVariant: null,
+        }));
+      }
+      reloadCoordinator.markReloadRequired("config", { type: "config", name: "opencode.json", action: "updated" });
+      try {
+        await client.reloadEngine(workspaceId);
+      } catch {
+        // The reload toast still lets the user retry if the immediate reload fails.
+      }
+      await refreshProviderListQueries(getReactQueryClient());
+      try {
+        window.dispatchEvent(new CustomEvent("openwork-server-settings-changed"));
+      } catch {
+        // ignore browser event dispatch failures
+      }
+      setLocalProviderStatus(`Added ${input.name} with ${modelId}.`);
+    } catch (error) {
+      setLocalProviderError(describeRouteError(error));
+    } finally {
+      setLocalProviderBusy(false);
+    }
+  }, [local, openworkClient, reloadCoordinator, runtimeWorkspaceId, selectedWorkspaceEndpoint]);
+
+  useEffect(() => {
     const openFromPending = (raw: string | null) => {
       if (!raw) return false;
-      const parsed = JSON.parse(raw);
-      setModelPickerInitialTab(parsed?.initialTab === "available" ? "available" : "default");
       setModelPickerQuery("");
       setModelPickerOpen(true);
       return true;
@@ -838,9 +1054,7 @@ function SettingsRouteContent() {
       window.localStorage.removeItem(pendingModelPickerProviderIdsKey);
     }
 
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ initialTab?: "default" | "available" }>).detail;
-      setModelPickerInitialTab(detail?.initialTab ?? "default");
+    const handler = () => {
       setModelPickerQuery("");
       setModelPickerOpen(true);
       try {
@@ -1602,7 +1816,7 @@ function SettingsRouteContent() {
     openworkReconnectBusy: openworkServerSnapshot.openworkReconnectBusy,
     reconnectOpenworkServer: handleReconnectMessagingServer,
     restartMessagingWorker: handleRestartMessagingWorker,
-    workspaceId: selectedWorkspace?.id ?? null,
+    workspaceId: runtimeWorkspaceId,
     selectedWorkspaceRoot,
   });
 
@@ -1640,7 +1854,7 @@ function SettingsRouteContent() {
               openworkServerClient={openworkClient}
               openworkServerStatus={routeOpenworkStatus}
               openworkServerCapabilities={routeOpenworkCapabilities}
-              runtimeWorkspaceId={selectedWorkspace?.id ?? null}
+              runtimeWorkspaceId={runtimeWorkspaceId}
               selectedWorkspaceRoot={selectedWorkspaceRoot}
               activeWorkspaceType={workspaceType}
               onConfigUpdated={() => {
@@ -1680,13 +1894,6 @@ function SettingsRouteContent() {
         return (
           <PreferencesView
             busy={busy}
-            defaultModelLabel={defaultModelLabel}
-            defaultModelRef={defaultModelRef}
-            onChangeDefaultModel={() => {
-              setModelPickerInitialTab("default");
-              setModelPickerQuery("");
-              setModelPickerOpen(true);
-            }}
             showThinking={local.prefs.showThinking}
             onToggleShowThinking={() => {
               local.setPrefs((previous) => ({ ...previous, showThinking: !previous.showThinking }));
@@ -1750,6 +1957,28 @@ function SettingsRouteContent() {
                 quickConnect={connectionsStore.quickConnect}
                 connectMcp={(entry) => {
                   void connectionsStore.connectMcp(entry);
+                }}
+                configSlotForEntry={(entry) => getExtensionConfigSlot(entry, {
+                  imageExtension: {
+                    busy: imageExtensionBusy || imageGenerationBusy,
+                    status: imageExtensionStatus ?? imageGenerationStatus,
+                    error: imageExtensionError ?? imageGenerationError,
+                    envKeyDetected: providers.some((p) => p.id === "openai" && p.source === "env") || providerConnectedIds.includes("openai"),
+                    onInstall: installOpenAiImageExtension,
+                    onTestGenerate: generateOpenAiTestImage,
+                  },
+                  localProvider: {
+                    busy: localProviderBusy,
+                    status: localProviderStatus,
+                    error: localProviderError,
+                    onInstall: installLocalProvider,
+                  },
+                })}
+                isExtensionConnected={(entry) => {
+                  const id = entry.serverName ?? entry.name;
+                  if (id === "openai-image-gen") return imageExtensionInstalled;
+                  if (id === "ollama") return providerConnectedIds.includes("ollama");
+                  return false;
                 }}
                 authorizeMcp={(entry) => {
                   void connectionsStore.authorizeMcp(entry);
@@ -1850,7 +2079,7 @@ function SettingsRouteContent() {
               openworkServerUrl: openworkServerSnapshot.openworkServerUrl,
               openworkServerSettings: openworkServerSnapshot.openworkServerSettings,
               openworkServerHostInfo: openworkServerSnapshot.openworkServerHostInfo,
-              runtimeWorkspaceId: selectedWorkspace?.id ?? null,
+              runtimeWorkspaceId,
               updateOpenworkServerSettings: openworkServerStore.updateOpenworkServerSettings,
               resetOpenworkServerSettings: openworkServerStore.resetOpenworkServerSettings,
               testOpenworkServerConnection: openworkServerStore.testOpenworkServerConnection,
@@ -2072,7 +2301,6 @@ function SettingsRouteContent() {
       <ModelPickerModal
         open={modelPickerOpen}
         options={modelOptions}
-        initialTab={modelPickerInitialTab}
         query={modelPickerQuery}
         setQuery={setModelPickerQuery}
         target="default"

@@ -49,6 +49,8 @@ export type ExtensionDetailModalProps = {
   onConnect?: () => void;
   /** Uninstall/disconnect handler. Shown when connected. */
   onUninstall?: () => void;
+  /** Extension-specific configuration UI rendered inside the modal body. */
+  configSlot?: React.ReactNode;
 };
 
 const kindLabel: Record<ExtensionKind, string> = {
@@ -56,6 +58,7 @@ const kindLabel: Record<ExtensionKind, string> = {
   plugin: "Plugin",
   skill: "Skill",
   "ui-control": "UI Control",
+  extension: "OpenWork Extension",
 };
 
 const kindDesc: Record<ExtensionKind, string> = {
@@ -63,6 +66,7 @@ const kindDesc: Record<ExtensionKind, string> = {
   plugin: "Extends OpenWork with additional capabilities managed by your organization.",
   skill: "A reusable workflow that your agent can execute on demand.",
   "ui-control": "Lets another MCP client inspect and drive this OpenWork desktop UI through a local stdio wrapper.",
+  extension: "An OpenWork extension that adds tools, providers, or integrations to your workspace.",
 };
 
 const uiControlClientConfig = `{
@@ -161,6 +165,7 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
     onReveal,
     onConnect,
     onUninstall,
+    configSlot,
   } = props;
 
   return (
@@ -317,6 +322,8 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
                 </div>
               </div>
             ) : null}
+
+            {configSlot}
           </div>
         </div>
 
