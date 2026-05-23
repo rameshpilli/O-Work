@@ -1942,6 +1942,7 @@ function SettingsRouteContent() {
             onRefresh={() => {
               void connectionsStore.refreshMcpServers();
               void extensionsStore.refreshPlugins();
+              void extensionsStore.refreshCloudOrgMarketplaces({ force: true });
             }}
             mcpView={
               <McpView
@@ -1995,12 +1996,22 @@ function SettingsRouteContent() {
                 }
                 readConfigFile={(scope) => connectionsStore.readMcpConfigFile(scope)}
                 installedSkills={extensionsStore.skills()}
+                installedPlugins={Object.values(extensionsStore.importedCloudPlugins())}
                 uninstallSkill={(name) => { void extensionsStore.uninstallSkill(name); }}
+                removeCloudPlugin={(pluginId) => { void extensionsStore.removeCloudOrgPlugin(pluginId); }}
                 readSkill={(name) => extensionsStore.readSkill(name)}
                 showHeader={false}
               />
             }
 
+            cloudMarketplaceView={
+              <CloudMarketplacesView
+                embedded
+                extensions={extensionsStore}
+                session={denSession}
+                onOpenAccount={openCloudAccountSettings}
+              />
+            }
           />
         );
       case "cloud-account":

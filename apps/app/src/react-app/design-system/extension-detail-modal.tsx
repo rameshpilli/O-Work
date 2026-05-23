@@ -28,6 +28,7 @@ import type { ExtensionKind } from "@/app/constants";
 import { MarkdownBlock } from "../domains/session/surface/markdown";
 import { modalBodyClass } from "../domains/workspace/modal-styles";
 import { resolveExtensionIconSrc } from "./extension-icon-src";
+import { ExtensionMeshAvatar } from "./extension-mesh-avatar";
 
 export type ExtensionDetailModalProps = {
   open: boolean;
@@ -40,6 +41,8 @@ export type ExtensionDetailModalProps = {
   kind?: ExtensionKind;
   connected?: boolean;
   connecting?: boolean;
+  /** Whether this item is hidden from the normal extensions catalog. */
+  hidden?: boolean;
   /** Remote URL if applicable. */
   url?: string;
   /** Whether OAuth is required. */
@@ -58,8 +61,15 @@ export type ExtensionDetailModalProps = {
   contentPreview?: string;
   /** Connect handler. */
   onConnect?: () => void;
+  connectLabel?: string;
+  connectingLabel?: string;
   /** Uninstall/disconnect handler. Shown when connected. */
   onUninstall?: () => void;
+  uninstallLabel?: string;
+  /** Hide from the normal catalog view. */
+  onHide?: () => void;
+  /** Show again in the normal catalog view. */
+  onShow?: () => void;
   /** Extension-specific configuration UI rendered inside the modal body. */
   configSlot?: React.ReactNode;
 };
@@ -166,6 +176,7 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
     kind = "mcp",
     connected = false,
     connecting = false,
+    hidden = false,
     url,
     oauth,
     launchCommand,
@@ -175,7 +186,12 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
     contentPreview,
     onReveal,
     onConnect,
+    connectLabel = "Connect",
+    connectingLabel = "Connecting...",
     onUninstall,
+    uninstallLabel,
+    onHide,
+    onShow,
     configSlot,
   } = props;
   const resolvedIconSrc = iconSrc ? resolveExtensionIconSrc(iconSrc) : undefined;
@@ -208,7 +224,9 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
                     <img src={`https://cdn.simpleicons.org/${iconSlug}`} alt="" width={20} height={20} loading="lazy" style={{ display: "block" }} />
                   </div>
                 ) : (
-                  <FallbackIcon size={24} className="text-muted-foreground" />
+                  kind === "plugin" ? (
+                    <ExtensionMeshAvatar name={name} className="size-9 rounded-lg text-xs font-bold shadow-inner" />
+                  ) : <FallbackIcon size={24} className="text-muted-foreground" />
                 )}
               </div>
               {connected ? (
@@ -291,6 +309,11 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
                         : (connected ? "Connected" : connecting ? "Connecting..." : "Not connected")}
                     </span>
                   </div>
+
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Visibility</span>
+                    <span className="font-medium text-card-foreground">{hidden ? "Hidden" : "Shown"}</span>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -346,14 +369,31 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
 
         <DialogFooter className="shrink-0">
           <div className="flex justify-between">
-            <div>
+            <div className="flex gap-2">
+              {hidden && onShow ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { onShow(); onClose(); }}
+                >
+                  Show
+                </Button>
+              ) : !hidden && onHide ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { onHide(); onClose(); }}
+                >
+                  Hide
+                </Button>
+              ) : null}
               {connected && onUninstall ? (
                 <Button
                   variant="destructive"
                   size="sm"
                   onClick={() => { onUninstall(); onClose(); }}
                 >
-                  {kind === "skill" ? "Uninstall" : "Disconnect"}
+                  {uninstallLabel ?? (kind === "skill" ? "Uninstall" : "Disconnect")}
                 </Button>
               ) : null}
             </div>
@@ -369,10 +409,10 @@ export function ExtensionDetailModal(props: ExtensionDetailModalProps) {
                   {connecting ? (
                     <>
                       <Loader2 data-icon="inline-start" className="animate-spin" />
-                      Connecting...
+                      {connectingLabel}
                     </>
                   ) : (
-                    "Connect"
+                    connectLabel
                   )}
                 </Button>
               ) : null}
