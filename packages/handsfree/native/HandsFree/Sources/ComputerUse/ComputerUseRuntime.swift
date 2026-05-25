@@ -196,7 +196,8 @@ actor ComputerUseRuntime {
     private func ensureFrontmostMonitor() {
         if frontmostMonitor != nil { return }
         frontmostMonitor = FrontmostApplicationMonitor { [weak self] pid in
-            Task { await self?.frontmostApplicationChanged(pid: pid) }
+            guard let runtime = self else { return }
+            Task { await runtime.frontmostApplicationChanged(pid: pid) }
         }
     }
 
