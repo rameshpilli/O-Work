@@ -1722,7 +1722,7 @@ function createRoutes(
     return jsonResponse({ ok: true });
   });
 
-  addRoute(routes, "POST", "/voice/realtime/session", "host-token", async (ctx) => {
+  addRoute(routes, "POST", "/voice/realtime/session", "host", async (ctx) => {
     const body = await readJsonBody(ctx.request);
     return jsonResponse(await createOpenAiRealtimeVoiceSession(env, body));
   });
