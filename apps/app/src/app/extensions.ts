@@ -83,6 +83,7 @@ export type OpenWorkExtensionManifest = {
   id: string;
   name: string;
   description: string;
+  preview?: boolean;
   source: OpenWorkExtensionSource;
   icon?: {
     src?: string;
@@ -151,6 +152,7 @@ export const BUILT_IN_OPENWORK_EXTENSION_MANIFESTS: OpenWorkExtensionManifest[] 
     id: "handsfree-computer-use",
     name: "HandsFree Computer Use",
     description: "Control macOS apps through semantic accessibility refs, screenshots, background-safe clicks, keyboard input, and strict mode.",
+    preview: true,
     source: { format: "openwork-builtin", origin: "builtin", trusted: true },
     icon: { src: "/openwork-mark.svg" },
     composer: { prompt: "Use HandsFree Computer Use to " },
@@ -213,6 +215,38 @@ export const BUILT_IN_OPENWORK_EXTENSION_MANIFESTS: OpenWorkExtensionManifest[] 
       { type: "composer-prompt", prompt: "Use the OpenAI Image Gen extension to ", location: "composer" },
     ],
     lifecycle: { reload: ["plugins"], detection: ["plugin:openwork-image-generation"] },
+  },
+  {
+    schemaVersion: 1,
+    id: "openwork-voice",
+    name: "Voice Mode",
+    description: "Talk to OpenWork through a Realtime voice panel that drives the same semantic UI controls as OpenWork UI MCP.",
+    source: { format: "openwork-builtin", origin: "builtin", trusted: true },
+    icon: { src: "/openwork-mark.svg" },
+    composer: { prompt: "Use Voice Mode to " },
+    setup: {
+      instructions: "Voice Mode uses OpenAI Realtime. Save an OpenAI API key in OpenWork env vars, then open the session rail panel and speak or send a typed voice command.",
+      primaryCta: "Save OpenAI key",
+      secondaryCta: "Test Realtime",
+      requiredEnv: ["OPENAI_REALTIME_API_KEY", "OPENAI_API_KEY"],
+      testActionRef: "openwork.voice.testRealtime",
+    },
+    resources: [
+      { type: "secret", id: "openai-realtime-api-key", envKey: "OPENAI_REALTIME_API_KEY", required: false },
+      { type: "secret", id: "openai-api-key", envKey: "OPENAI_API_KEY", required: true },
+      { type: "local-service", id: "openwork-voice-realtime-session", label: "Realtime client-secret minting", required: true },
+    ],
+    contributions: [
+      { type: "settings-panel", ref: "openwork.voice.settings", location: "settings-detail" },
+      { type: "session-side-panel", ref: "openwork.voice.panel", location: "session-right-pane" },
+      { type: "session-rail-item", ref: "openwork.voice.rail", label: "Voice Mode", location: "session-rail" },
+      { type: "server-route", ref: "POST /voice/realtime/session", location: "server" },
+      { type: "control-actions", ref: "openwork.voice.controlActions" },
+      { type: "test-action", ref: "openwork.voice.testRealtime", label: "Test Realtime" },
+      { type: "composer-prompt", prompt: "Use Voice Mode to ", location: "composer" },
+    ],
+    lifecycle: { reload: ["config"], detection: ["env:OPENAI_REALTIME_API_KEY", "env:OPENAI_API_KEY"] },
+    defaultEnabled: true,
   },
   {
     schemaVersion: 1,
