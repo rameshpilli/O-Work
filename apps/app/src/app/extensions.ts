@@ -221,6 +221,7 @@ export const BUILT_IN_OPENWORK_EXTENSION_MANIFESTS: OpenWorkExtensionManifest[] 
     id: "openwork-voice",
     name: "Voice Mode",
     description: "Talk to OpenWork through a Realtime voice panel that drives the same semantic UI controls as OpenWork UI MCP.",
+    preview: true,
     source: { format: "openwork-builtin", origin: "builtin", trusted: true },
     icon: { src: "/openwork-mark.svg" },
     composer: { prompt: "Use Voice Mode to " },
