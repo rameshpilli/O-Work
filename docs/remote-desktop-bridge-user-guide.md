@@ -198,5 +198,6 @@ It uploads:
 
 - a macOS installer artifact
 - a Windows installer artifact
+- Windows UI smoke screenshots and a shell snapshot report
 
 The user can install the desktop app first and add the remote worker URL and token later through the UI.

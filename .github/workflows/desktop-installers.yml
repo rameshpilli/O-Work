@@ -48,8 +48,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build desktop bundle
+        run: pnpm --filter @openwork/desktop build:electron
+
+      - name: Capture Windows UI smoke screenshots
+        if: runner.os == 'Windows'
+        run: pnpm --filter @openwork/desktop smoke:screenshot -- --outdir dist-electron/smoke-artifacts
+
       - name: Build installer
-        run: pnpm --filter @openwork/desktop package:electron
+        run: pnpm --dir apps/desktop exec electron-builder --config electron-builder.yml --publish never
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4

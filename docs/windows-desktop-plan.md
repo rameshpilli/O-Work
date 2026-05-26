@@ -93,6 +93,7 @@ Current outputs:
 
 - macOS installer artifacts from `macos-latest`
 - Windows installer artifacts from `windows-latest`
+- Windows UI smoke screenshots and a text/JSON shell snapshot from `windows-latest`
 
 The workflow uploads everything from `apps/desktop/dist-electron/**`, which includes the generated installer payloads.
 
@@ -139,6 +140,12 @@ It will upload artifacts for:
 
 - `openwork-macos-installer`
 - `openwork-windows-installer`
+
+The Windows artifact now also includes:
+
+- `smoke-artifacts/windows-ui-smoke.png`
+- `smoke-artifacts/windows-ui-smoke.json`
+- `smoke-artifacts/windows-ui-smoke.txt`
 
 ### What users should eventually download
 

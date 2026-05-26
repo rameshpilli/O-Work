@@ -3274,8 +3274,9 @@ ipcMain.on("openwork:menu-overlay:dismiss", (event) => {
 
 registerMigrationIpc({ app, ipcMain });
 const { ensureAutoUpdater } = registerUpdaterIpc({ app, ipcMain, getMainWindow: () => mainWindow });
+const allowMultiInstanceForAutomation = process.env.OPENWORK_ALLOW_MULTI_INSTANCE === "1";
 
-if (!app.requestSingleInstanceLock()) {
+if (!allowMultiInstanceForAutomation && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("before-quit", (event) => {
