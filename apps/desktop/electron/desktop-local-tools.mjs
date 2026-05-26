@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { stat, readdir, readFile, realpath } from "node:fs/promises";
+import { appendFile, mkdir, stat, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_LIST_LIMIT = 500;
+const DEFAULT_ALLOWED_COMMANDS = Object.freeze(["pwd", "ls", "cat", "rg"]);
 
 function trim(value) {
   return String(value ?? "").trim();
@@ -272,12 +273,26 @@ export async function createDesktopLocalToolAdapter(input = {}) {
   const homeDir = input.homeDir || os.homedir();
   const allowedRoots = await resolveAllowedRoots(input.allowedRoots ?? [], homeDir);
   const defaultRoot = allowedRoots[0] || homeDir;
+  const allowedCommandSet = new Set(
+    (Array.isArray(input.allowedCommands) && input.allowedCommands.length > 0
+      ? input.allowedCommands
+      : DEFAULT_ALLOWED_COMMANDS)
+      .map((entry) => trim(entry).toLowerCase())
+      .filter((entry) => entry && SHELL_BUILDERS[entry]),
+  );
   const limits = {
     maxReadBytes: toInteger(input?.limits?.maxReadBytes, 256 * 1024),
+    maxWriteBytes: toInteger(input?.limits?.maxWriteBytes, 256 * 1024),
     maxStdoutBytes: toInteger(input?.limits?.maxStdoutBytes, 256 * 1024),
     maxStderrBytes: toInteger(input?.limits?.maxStderrBytes, 128 * 1024),
     shellTimeoutMs: toInteger(input?.limits?.shellTimeoutMs, 15_000),
   };
+  const extraTools = Array.isArray(input.extraTools) ? input.extraTools.filter(Boolean) : [];
+  const extraToolMap = new Map(
+    extraTools
+      .filter((tool) => typeof tool?.name === "string" && typeof tool?.execute === "function")
+      .map((tool) => [tool.name, tool]),
+  );
 
   async function localFsList(toolInput = {}) {
     const resolved = await resolveSecurePath(toolInput.path || defaultRoot, {
@@ -331,8 +346,97 @@ export async function createDesktopLocalToolAdapter(input = {}) {
     };
   }
 
+  async function localFsWrite(toolInput = {}) {
+    const targetPath = trim(toolInput.path);
+    if (!targetPath) {
+      throw codeError("local-fs.write requires a path", "INVALID_INPUT");
+    }
+    const content = String(toolInput.content ?? "");
+    const byteLength = Buffer.byteLength(content, "utf8");
+    if (byteLength > limits.maxWriteBytes) {
+      throw codeError(`Write exceeds maxWriteBytes (${limits.maxWriteBytes})`, "WRITE_TOO_LARGE");
+    }
+    const expandedTarget = expandHome(targetPath, homeDir);
+    const absolute = path.isAbsolute(expandedTarget) ? expandedTarget : path.resolve(defaultRoot, expandedTarget);
+    const parentPath = path.dirname(absolute);
+    const parent = await resolveSecurePath(parentPath, {
+      homeDir,
+      cwd: defaultRoot,
+      allowedRoots,
+      mustExist: toolInput.createParents !== true,
+      expect: "directory",
+    });
+    if (toolInput.createParents === true) {
+      await mkdir(parent.path, { recursive: true });
+    }
+    const existing = await stat(absolute).catch(() => null);
+    if (existing && existing.isDirectory()) {
+      throw codeError(`Expected a file path: ${absolute}`, "EXPECTED_FILE");
+    }
+    if (existing && toolInput.append !== true && toolInput.overwrite === false) {
+      throw codeError(`Refusing to overwrite existing file: ${absolute}`, "FILE_EXISTS");
+    }
+    if (toolInput.append === true) {
+      await appendFile(absolute, content, "utf8");
+    } else {
+      await writeFile(absolute, content, "utf8");
+    }
+    const resolved = await resolveSecurePath(absolute, {
+      homeDir,
+      cwd: defaultRoot,
+      allowedRoots,
+      mustExist: true,
+      expect: "file",
+    });
+    return {
+      path: resolved.path,
+      bytesWritten: byteLength,
+      appended: toolInput.append === true,
+      overwritten: Boolean(existing) && toolInput.append !== true,
+    };
+  }
+
+  async function localFsPatch(toolInput = {}) {
+    const resolved = await resolveSecurePath(toolInput.path, {
+      homeDir,
+      cwd: defaultRoot,
+      allowedRoots,
+      mustExist: true,
+      expect: "file",
+    });
+    const search = String(toolInput.search ?? "");
+    if (!search) {
+      throw codeError("local-fs.patch requires a non-empty search string", "INVALID_INPUT");
+    }
+    const replace = String(toolInput.replace ?? "");
+    const original = await readFile(resolved.path, "utf8");
+    const occurrences = original.split(search).length - 1;
+    if (occurrences <= 0) {
+      throw codeError(`Search text was not found in ${resolved.path}`, "PATCH_NOT_FOUND");
+    }
+    const expectedMatches = Number.isInteger(toolInput.expectedMatches) ? Number(toolInput.expectedMatches) : null;
+    if (expectedMatches !== null && occurrences !== expectedMatches) {
+      throw codeError(`Expected ${expectedMatches} matches but found ${occurrences}`, "PATCH_MATCH_COUNT");
+    }
+    const replaceAll = toolInput.replaceAll !== false;
+    const nextContent = replaceAll ? original.split(search).join(replace) : original.replace(search, replace);
+    const byteLength = Buffer.byteLength(nextContent, "utf8");
+    if (byteLength > limits.maxWriteBytes) {
+      throw codeError(`Patched file exceeds maxWriteBytes (${limits.maxWriteBytes})`, "WRITE_TOO_LARGE");
+    }
+    await writeFile(resolved.path, nextContent, "utf8");
+    return {
+      path: resolved.path,
+      replacements: replaceAll ? occurrences : 1,
+      size: byteLength,
+    };
+  }
+
   async function localShellExec(toolInput = {}, hooks = {}) {
     const command = trim(toolInput.command).toLowerCase();
+    if (!allowedCommandSet.has(command)) {
+      throw codeError(`Command is not allowed by policy: ${toolInput.command}`, "COMMAND_NOT_ALLOWED");
+    }
     const builder = SHELL_BUILDERS[command];
     if (!builder) {
       throw codeError(`Command is not allowed: ${toolInput.command}`, "COMMAND_NOT_ALLOWED");
@@ -353,6 +457,7 @@ export async function createDesktopLocalToolAdapter(input = {}) {
       homeDir,
       allowedRoots,
       defaultRoot,
+      allowedCommands: Array.from(allowedCommandSet),
       limits,
     },
     describeTools() {
@@ -380,11 +485,39 @@ export async function createDesktopLocalToolAdapter(input = {}) {
           ),
         },
         {
+          name: "local-fs.write",
+          description: "Write a local text file under an approved root on the employee machine.",
+          inputSchema: schemaProperties(
+            {
+              path: { type: "string", description: "Target file path under an approved root." },
+              content: { type: "string", description: "Full text content to write." },
+              append: { type: "boolean", description: "Append instead of overwrite." },
+              overwrite: { type: "boolean", description: "Allow overwrite when the file already exists." },
+              createParents: { type: "boolean", description: "Create parent directories when missing." },
+            },
+            ["path", "content"],
+          ),
+        },
+        {
+          name: "local-fs.patch",
+          description: "Apply a simple text replacement to a local file under an approved root.",
+          inputSchema: schemaProperties(
+            {
+              path: { type: "string", description: "Target file path under an approved root." },
+              search: { type: "string", description: "Exact text to search for." },
+              replace: { type: "string", description: "Replacement text." },
+              replaceAll: { type: "boolean", description: "Replace every occurrence. Defaults to true." },
+              expectedMatches: { type: "integer", description: "Optional exact match count guard." },
+            },
+            ["path", "search", "replace"],
+          ),
+        },
+        {
           name: "local-shell.exec",
           description: "Run a restricted read-only local shell command on the employee machine.",
           inputSchema: schemaProperties(
             {
-              command: { type: "string", enum: Object.keys(SHELL_BUILDERS) },
+              command: { type: "string", enum: Array.from(allowedCommandSet) },
               cwd: { type: "string", description: "Working directory under an approved root." },
               paths: { type: "array", items: { type: "string" }, description: "Local file or directory paths." },
               pattern: { type: "string", description: "Pattern for rg." },
@@ -395,6 +528,13 @@ export async function createDesktopLocalToolAdapter(input = {}) {
             ["command"],
           ),
         },
+        ...extraTools
+          .filter((tool) => typeof tool?.name === "string")
+          .map((tool) => ({
+            name: tool.name,
+            description: String(tool.description ?? ""),
+            inputSchema: tool.inputSchema ?? schemaProperties({}, []),
+          })),
       ];
     },
     async executeToolCall(toolName, toolInput = {}, hooks = {}) {
@@ -404,9 +544,22 @@ export async function createDesktopLocalToolAdapter(input = {}) {
             return await localFsList(toolInput);
           case "local-fs.read":
             return await localFsRead(toolInput);
+          case "local-fs.write":
+            return await localFsWrite(toolInput);
+          case "local-fs.patch":
+            return await localFsPatch(toolInput);
           case "local-shell.exec":
             return await localShellExec(toolInput, hooks);
           default: {
+            const extra = extraToolMap.get(toolName);
+            if (extra) {
+              return await extra.execute(toolInput, hooks, {
+                homeDir,
+                allowedRoots,
+                defaultRoot,
+                limits,
+              });
+            }
             throw codeError(`Unsupported local tool: ${toolName}`, "UNKNOWN_TOOL");
           }
         }

@@ -43,6 +43,7 @@ let connectUrl = "";
 const messages = [];
 const toolResults = new Map();
 const connected = deferred();
+const approvalResponses = [];
 
 before(async () => {
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "openwork-bridge-client-"));
@@ -79,9 +80,21 @@ before(async () => {
           type: "server_hello",
           deviceId: payload.device?.id,
         }));
+        websocket.send(JSON.stringify({
+          type: "policy_update",
+          policy: {
+            version: 1,
+            allowedRoots: [allowedRoot],
+            shell: { allowedCommands: ["pwd", "ls", "cat", "rg"] },
+            approvalRules: [],
+          },
+        }));
       }
       if (payload.type === "tool_result") {
         toolResults.set(payload.callId, payload);
+      }
+      if (payload.type === "approval_response") {
+        approvalResponses.push(payload);
       }
     });
   });
@@ -107,10 +120,31 @@ before(async () => {
     appName: "OpenWork Test",
     appVersion: "1.0.0-test",
     homeDir: tempRoot,
+    requestApproval: async () => ({ approved: true }),
   });
   await client.start();
   await connected.promise;
   await waitFor(() => messages.some((entry) => entry.type === "capabilities_advertise"));
+  it("returns an approval response when the server requests approval", async () => {
+    const websocket = await connected.promise;
+    websocket.send(JSON.stringify({
+      type: "approval_request",
+      callId: "approval-1",
+      toolName: "local-shell.exec",
+      approval: {
+        ruleId: "local-shell-exec-approval",
+        action: "require_approval",
+        title: "Approve local shell command",
+        message: "This action will run a read-only shell command on your computer.",
+      },
+      input: {
+        command: "ls",
+        paths: [allowedRoot],
+      },
+    }));
+    const approval = await waitFor(() => approvalResponses.find((entry) => entry.callId === "approval-1"));
+    assert.equal(approval.approved, true);
+  });
 });
 
 after(async () => {

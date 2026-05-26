@@ -41,6 +41,30 @@ describe("desktop local tools", () => {
     assert.equal(result.truncated, false);
   });
 
+  it("writes a text file under an approved root", async () => {
+    const outputPath = path.join(fixtureRoot, "written.txt");
+    const result = await adapter.executeToolCall("local-fs.write", {
+      path: outputPath,
+      content: "written by bridge\n",
+    });
+    assert.equal(path.basename(result.path), "written.txt");
+    const verify = await adapter.executeToolCall("local-fs.read", { path: outputPath });
+    assert.match(verify.content, /written by bridge/);
+  });
+
+  it("patches a text file under an approved root", async () => {
+    const outputPath = path.join(fixtureRoot, "patch-me.txt");
+    await writeFile(outputPath, "hello TODO world\n", "utf8");
+    const result = await adapter.executeToolCall("local-fs.patch", {
+      path: outputPath,
+      search: "TODO",
+      replace: "DONE",
+    });
+    assert.equal(result.replacements, 1);
+    const verify = await adapter.executeToolCall("local-fs.read", { path: outputPath });
+    assert.match(verify.content, /DONE/);
+  });
+
   it("runs a restricted ls command locally", async () => {
     const result = await adapter.executeToolCall("local-shell.exec", {
       command: "ls",
@@ -72,6 +96,10 @@ describe("desktop local tools", () => {
       adapter.executeToolCall("local-fs.read", { path: "/etc/hosts" }),
       /outside the approved roots/i,
     );
+    await assert.rejects(
+      adapter.executeToolCall("local-fs.write", { path: "/etc/hosts", content: "bad" }),
+      /outside the approved roots/i,
+    );
   });
 
   it("rejects commands outside the allowlist", async () => {
@@ -79,5 +107,19 @@ describe("desktop local tools", () => {
       adapter.executeToolCall("local-shell.exec", { command: "rm", paths: [fixtureRoot] }),
       /not allowed/i,
     );
+  });
+
+  it("enforces a narrower server-provided shell command policy", async () => {
+    const restricted = await createDesktopLocalToolAdapter({
+      homeDir: fixtureRoot,
+      allowedRoots: [fixtureRoot],
+      allowedCommands: ["pwd"],
+    });
+    await assert.rejects(
+      restricted.executeToolCall("local-shell.exec", { command: "ls", paths: [fixtureRoot] }),
+      /policy/i,
+    );
+    const pwd = await restricted.executeToolCall("local-shell.exec", { command: "pwd" });
+    assert.equal(pwd.exitCode, 0);
   });
 });

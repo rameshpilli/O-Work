@@ -1,4 +1,5 @@
 import os from "node:os";
+import path from "node:path";
 import { WebSocket } from "ws";
 
 import {
@@ -35,6 +36,30 @@ function protocolError(message, code = "PROTOCOL_ERROR") {
   return Object.assign(new Error(message), { code });
 }
 
+function isPathInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizeServerPolicyRoots(roots, homeDir) {
+  if (!Array.isArray(roots)) return [];
+  return roots
+    .map((entry) => trim(entry))
+    .filter(Boolean)
+    .map((entry) => {
+      if (entry === "~") return homeDir;
+      if (entry.startsWith("~/")) return path.join(homeDir, entry.slice(2));
+      return path.resolve(entry);
+    });
+}
+
+function intersectRoots(localRoots, serverRoots) {
+  if (!serverRoots.length) return [...localRoots];
+  return serverRoots.filter((serverRoot) =>
+    localRoots.some((localRoot) => isPathInside(localRoot, serverRoot) || isPathInside(serverRoot, localRoot)),
+  );
+}
+
 export function createDesktopBridgeClient(input) {
   const userDataDir = input.userDataDir;
   const appVersion = trim(input.appVersion) || "0.0.0";
@@ -42,9 +67,14 @@ export function createDesktopBridgeClient(input) {
   const homeDir = input.homeDir || os.homedir();
   const log = typeof input.log === "function" ? input.log : (...args) => console.info("[desktop-bridge]", ...args);
   const logError = typeof input.logError === "function" ? input.logError : (...args) => console.warn("[desktop-bridge]", ...args);
+  const requestApproval = typeof input.requestApproval === "function"
+    ? input.requestApproval
+    : async () => ({ approved: false, reason: "No desktop approval handler is configured." });
+  const extraTools = Array.isArray(input.extraTools) ? input.extraTools.filter(Boolean) : [];
 
   let currentConfig = null;
   let localTools = null;
+  let currentServerPolicy = null;
   let socket = null;
   let heartbeatTimer = null;
   let connectLoopPromise = null;
@@ -81,7 +111,27 @@ export function createDesktopBridgeClient(input) {
       configPath: desktopBridgeConfigPath(userDataDir),
       config: currentConfig ? redactedDesktopBridgeConfig(currentConfig) : null,
       allowedRoots: localTools?.policy?.allowedRoots ?? [],
+      allowedCommands: localTools?.policy?.allowedCommands ?? [],
+      serverPolicy: currentServerPolicy,
     };
+  }
+
+  async function rebuildLocalTools() {
+    if (!currentConfig) return null;
+    const serverRoots = normalizeServerPolicyRoots(currentServerPolicy?.allowedRoots ?? [], homeDir);
+    const allowedRoots = intersectRoots(currentConfig.allowedRoots ?? [], serverRoots);
+    const allowedCommands = Array.isArray(currentServerPolicy?.shell?.allowedCommands)
+      ? currentServerPolicy.shell.allowedCommands.map((entry) => trim(entry).toLowerCase()).filter(Boolean)
+      : undefined;
+    localTools = await createDesktopLocalToolAdapter({
+      homeDir,
+      allowedRoots,
+      allowedCommands,
+      extraTools,
+      limits: currentConfig.limits,
+    });
+    updateState({ tools: localTools.describeTools().map((tool) => tool.name) });
+    return localTools;
   }
 
   async function loadConfig() {
@@ -93,12 +143,7 @@ export function createDesktopBridgeClient(input) {
       serverUrl: next.serverUrl,
       websocketUrl: toWebSocketUrl(next),
     });
-    localTools = await createDesktopLocalToolAdapter({
-      homeDir,
-      allowedRoots: next.allowedRoots,
-      limits: next.limits,
-    });
-    updateState({ tools: localTools.describeTools().map((tool) => tool.name) });
+    await rebuildLocalTools();
     return next;
   }
 
@@ -193,6 +238,27 @@ export function createDesktopBridgeClient(input) {
     }
   }
 
+  async function handleApprovalRequest(payload) {
+    const callId = trim(payload?.callId || payload?.id);
+    const toolName = trim(payload?.toolName || payload?.name);
+    if (!callId) throw protocolError("approval_request is missing callId", "INVALID_APPROVAL_REQUEST");
+    if (!toolName) throw protocolError("approval_request is missing toolName", "INVALID_APPROVAL_REQUEST");
+    const decision = await requestApproval({
+      callId,
+      toolName,
+      input: payload?.input ?? payload?.arguments ?? {},
+      approval: payload?.approval ?? null,
+      policy: currentServerPolicy,
+    });
+    send({
+      type: "approval_response",
+      callId,
+      toolName,
+      approved: decision?.approved === true,
+      ...(trim(decision?.reason) ? { reason: trim(decision.reason) } : {}),
+    });
+  }
+
   async function handleMessage(raw) {
     let payload;
     try {
@@ -210,8 +276,16 @@ export function createDesktopBridgeClient(input) {
         }
         advertiseCapabilities();
         return;
+      case "policy_update":
+        currentServerPolicy = payload?.policy ?? null;
+        await rebuildLocalTools();
+        advertiseCapabilities();
+        return;
       case "capabilities_request":
         advertiseCapabilities();
+        return;
+      case "approval_request":
+        await handleApprovalRequest(payload);
         return;
       case "tool_call":
         await handleToolCall(payload);

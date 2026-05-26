@@ -1746,6 +1746,108 @@ function startDesktopBridgeAutoSync() {
   }, 10_000);
 }
 
+function desktopApprovalDetail(payload = {}) {
+  const lines = [];
+  const title = String(payload?.approval?.title ?? payload?.toolName ?? "Desktop approval").trim();
+  const message = String(payload?.approval?.message ?? "").trim();
+  if (message) lines.push(message);
+  lines.push(`Tool: ${String(payload?.toolName ?? "").trim() || "unknown"}`);
+  if (payload?.input && typeof payload.input === "object") {
+    const record = /** @type {Record<string, unknown>} */ (payload.input);
+    if (typeof record.command === "string" && record.command.trim()) {
+      lines.push(`Command: ${record.command.trim()}`);
+    }
+    if (typeof record.path === "string" && record.path.trim()) {
+      lines.push(`Path: ${record.path.trim()}`);
+    }
+    if (Array.isArray(record.paths) && record.paths.length > 0) {
+      lines.push(`Paths: ${record.paths.map((entry) => String(entry)).join(", ")}`);
+    }
+    if (typeof record.cwd === "string" && record.cwd.trim()) {
+      lines.push(`Working directory: ${record.cwd.trim()}`);
+    }
+    if (typeof record.pattern === "string" && record.pattern.trim()) {
+      lines.push(`Pattern: ${record.pattern.trim()}`);
+    }
+  }
+  return {
+    title,
+    detail: lines.join("\n"),
+  };
+}
+
+function desktopBridgeBrowserBounds() {
+  const [contentWidth, contentHeight] = mainWindow?.getContentSize?.() ?? [1280, 900];
+  return lastBrowserBounds ?? {
+    x: 0,
+    y: 88,
+    width: Math.max(900, contentWidth),
+    height: Math.max(640, contentHeight - 88),
+  };
+}
+
+async function desktopBridgeBrowserOpen(input = {}) {
+  await createMainWindow();
+  const tab = createBrowserTab(String(input.url ?? ""), { select: input.background !== true });
+  attachBrowserView(desktopBridgeBrowserBounds(), { preloadDefault: false, ensureTab: false });
+  if (input.background !== true) {
+    selectBrowserTab(tab.tabId);
+  }
+  return {
+    openedTabId: tab.tabId,
+    state: browserStatePayload(),
+  };
+}
+
+async function desktopBridgeBrowserNavigate(input = {}) {
+  await createMainWindow();
+  const url = normalizeBrowserUrl(String(input.url ?? ""));
+  let tab = getBrowserTab(typeof input.tabId === "string" ? input.tabId : undefined);
+  if (!tab) {
+    tab = createBrowserTab(url, { select: true });
+  } else {
+    tab.view.webContents.loadURL(url);
+    if (input.background !== true) {
+      selectBrowserTab(tab.tabId);
+    }
+  }
+  attachBrowserView(desktopBridgeBrowserBounds(), { preloadDefault: false, ensureTab: false });
+  return {
+    tabId: tab.tabId,
+    state: browserStatePayload(),
+  };
+}
+
+function desktopBridgeBrowserState() {
+  return browserStatePayload();
+}
+
+function desktopBridgeBrowserClose(input = {}) {
+  const tabId = typeof input.tabId === "string" ? input.tabId : undefined;
+  const closedTabId = closeBrowserTab(tabId);
+  return {
+    closedTabId,
+    state: browserStatePayload(),
+  };
+}
+
+function parseComputerUseResponse(response) {
+  const text = computerUseToolText(response);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {
+      text,
+      raw: response?.result ?? null,
+    };
+  }
+}
+
+async function desktopBridgeComputerUseTool(name, args = {}) {
+  const response = await callComputerUseMcpTool(name, args);
+  return parseComputerUseResponse(response);
+}
+
 const runtimeManager = createRuntimeManager({
   app,
   desktopRoot: path.resolve(__dirname, ".."),
@@ -1760,6 +1862,144 @@ const desktopBridgeClient = createDesktopBridgeClient({
   userDataDir: app.getPath("userData"),
   appVersion: app.getVersion(),
   appName: APP_NAME,
+  extraTools: [
+    {
+      name: "local-browser.open",
+      description: "Open a URL in the embedded OpenWork browser on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "URL to open." },
+          background: { type: "boolean", description: "Keep the tab in the background." },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+      execute: async (toolInput) => desktopBridgeBrowserOpen(toolInput),
+    },
+    {
+      name: "local-browser.navigate",
+      description: "Navigate an existing browser tab or create one if needed on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "URL to navigate to." },
+          tabId: { type: "string", description: "Optional existing tab id." },
+          background: { type: "boolean", description: "Keep the tab in the background." },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+      execute: async (toolInput) => desktopBridgeBrowserNavigate(toolInput),
+    },
+    {
+      name: "local-browser.state",
+      description: "Read the current embedded browser state on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+      execute: async () => desktopBridgeBrowserState(),
+    },
+    {
+      name: "local-browser.close",
+      description: "Close a browser tab on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string", description: "Optional browser tab id. Defaults to the active tab." },
+        },
+        additionalProperties: false,
+      },
+      execute: async (toolInput) => desktopBridgeBrowserClose(toolInput),
+    },
+    {
+      name: "local-computer-use.permissions",
+      description: "Check local computer-use permissions on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+      execute: async () => checkComputerUsePermissions(),
+    },
+    {
+      name: "local-computer-use.snapshot",
+      description: "Capture a semantic snapshot of an app window on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          appName: { type: "string", description: "Optional app name." },
+          strict: { type: "boolean", description: "Prefer background-safe mode when true." },
+        },
+        additionalProperties: false,
+      },
+      execute: async (toolInput) => desktopBridgeComputerUseTool("snapshot", toolInput),
+    },
+    {
+      name: "local-computer-use.click",
+      description: "Click an element or screen point on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          appName: { type: "string" },
+          ref: { type: "string" },
+          index: { type: "integer" },
+          imageX: { type: "number" },
+          imageY: { type: "number" },
+          clickCount: { type: "integer" },
+          strict: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+      execute: async (toolInput) => desktopBridgeComputerUseTool("click", toolInput),
+    },
+    {
+      name: "local-computer-use.type_text",
+      description: "Type text into the currently focused app on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "Exact text to type." },
+          strict: { type: "boolean" },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+      execute: async (toolInput) => desktopBridgeComputerUseTool("type_text", toolInput),
+    },
+    {
+      name: "local-computer-use.press_key",
+      description: "Press a key or key combination on the employee machine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          combo: { type: "string", description: "Key combo such as command+k." },
+          strict: { type: "boolean" },
+        },
+        required: ["combo"],
+        additionalProperties: false,
+      },
+      execute: async (toolInput) => desktopBridgeComputerUseTool("press_key", toolInput),
+    },
+  ],
+  requestApproval: async (payload) => {
+    const { title, detail } = desktopApprovalDetail(payload);
+    const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow() ?? mainWindow ?? undefined, {
+      type: "question",
+      buttons: ["Allow once", "Deny"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "OpenWork desktop approval",
+      message: title,
+      detail,
+      noLink: true,
+    });
+    return response.response === 0
+      ? { approved: true }
+      : { approved: false, reason: "Denied in desktop approval dialog" };
+  },
 });
 let desktopBridgeSyncTimer = null;
 

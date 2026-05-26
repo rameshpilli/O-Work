@@ -62,4 +62,32 @@ describe("DesktopBridgeService", () => {
     expect(result.status).toBe("completed");
     expect(result.result).toEqual({ stdout: "Downloads\n" });
   });
+
+  test("local shell calls require approval before dispatch", () => {
+    const bridge = new DesktopBridgeService();
+    const issued = bridge.issueEnrollmentToken();
+    const enrolled = bridge.enrollDevice({
+      enrollmentToken: issued.token,
+      deviceName: "Bridge POC",
+    });
+
+    const sent: unknown[] = [];
+    const connected = bridge.connectDevice(enrolled.device.id, (message) => {
+      sent.push(message);
+    });
+
+    const queued = bridge.createToolCall({
+      deviceId: enrolled.device.id,
+      toolName: "local-shell.exec",
+      arguments: { command: "ls", paths: ["~/Downloads"] },
+    });
+    expect(queued.status).toBe("awaiting_approval");
+    expect((sent[0] as { type: string }).type).toBe("approval_request");
+
+    const approved = bridge.applyApprovalResponse(enrolled.device.id, connected.connectionId, queued.id, {
+      approved: true,
+    });
+    expect(approved.approval?.status).toBe("approved");
+    expect((sent[1] as { type: string }).type).toBe("tool_call");
+  });
 });

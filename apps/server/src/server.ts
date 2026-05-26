@@ -51,7 +51,7 @@ import {
   stripSensitiveWorkspaceExportData,
   type WorkspaceExportSensitiveMode,
 } from "./workspace-export-safety.js";
-import { createDesktopBridgeUpgradeHandler, DesktopBridgeService } from "./desktop-bridge.js";
+import { createDesktopBridgeUpgradeHandler, DesktopBridgeService, type DesktopBridgePolicyView } from "./desktop-bridge.js";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -82,6 +82,30 @@ function resolveDesktopBridgeProxyScriptPath() {
   if (configured) return configured;
   if (existsSync(DESKTOP_BRIDGE_PROXY_SCRIPT_SOURCE_PATH)) return DESKTOP_BRIDGE_PROXY_SCRIPT_SOURCE_PATH;
   return DESKTOP_BRIDGE_PROXY_SCRIPT_BUNDLED_PATH;
+}
+
+function parseDesktopBridgePolicyList(raw: string | undefined, fallback: string[]): string[] {
+  const value = raw?.trim() ?? "";
+  if (!value) return [...fallback];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function readDesktopBridgePolicyFromEnv(): Partial<DesktopBridgePolicyView> {
+  return {
+    allowedRoots: parseDesktopBridgePolicyList(
+      process.env.OPENWORK_DESKTOP_BRIDGE_ALLOWED_ROOTS,
+      ["~/Downloads", "~/Desktop", "~/Documents", "~/Developer"],
+    ),
+    shell: {
+      allowedCommands: parseDesktopBridgePolicyList(
+        process.env.OPENWORK_DESKTOP_BRIDGE_ALLOWED_COMMANDS,
+        ["pwd", "ls", "cat", "rg"],
+      ).map((entry) => entry.toLowerCase()),
+    },
+  };
 }
 
 const OPENWORK_VOICE_REALTIME_TOOLS = [
@@ -435,7 +459,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const approvals = new ApprovalService(config.approval);
   const reloadEvents = new ReloadEventStore();
   const tokens = new TokenService(config);
-  const desktopBridge = new DesktopBridgeService();
+  const desktopBridge = new DesktopBridgeService({ policy: readDesktopBridgePolicyFromEnv() });
   const env = new EnvService();
   const logger = createServerLogger(config);
   let watcherHandle = startReloadWatchers({ config, reloadEvents, logger });
@@ -1723,6 +1747,15 @@ function createRoutes(
     return jsonResponse({ items: desktopBridge.listDevices() });
   });
 
+  addRoute(routes, "GET", "/desktop/events", "host", async (ctx) => {
+    const limit = Number(ctx.url.searchParams.get("limit") ?? "100");
+    const workspaceId = ctx.url.searchParams.get("workspaceId")?.trim() || undefined;
+    const deviceId = ctx.url.searchParams.get("deviceId")?.trim() || undefined;
+    return jsonResponse({
+      items: await desktopBridge.listEvents({ limit, workspaceId, deviceId }),
+    });
+  });
+
   addRoute(routes, "GET", "/desktop/devices/:id", "host", async (ctx) => {
     return jsonResponse({ item: desktopBridge.getDevice(ctx.params.id) });
   });
@@ -1776,6 +1809,17 @@ function createRoutes(
       workspaceId: workspace.id,
       connected: Boolean(device),
       device,
+      policy: desktopBridge.getPolicy(),
+    });
+  });
+
+  addRoute(routes, "GET", "/workspace/:id/desktop-bridge/events", "client", async (ctx) => {
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    const limit = Number(ctx.url.searchParams.get("limit") ?? "100");
+    return jsonResponse({
+      ok: true,
+      workspaceId: workspace.id,
+      items: await desktopBridge.listEvents({ workspaceId: workspace.id, limit }),
     });
   });
 

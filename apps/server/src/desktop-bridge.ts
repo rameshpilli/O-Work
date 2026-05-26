@@ -1,18 +1,23 @@
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
+import { appendFile, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { ApiError } from "./errors.js";
 import type { Actor } from "./types.js";
 import type { TokenService } from "./tokens.js";
-import { hashToken, shortId } from "./utils.js";
+import { ensureDir, exists, hashToken, shortId } from "./utils.js";
 
 const DEFAULT_ENROLL_TTL_MS = 60 * 60 * 1000;
 const MAX_ENROLL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 30 * 1000;
 const MAX_TOOL_CALL_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_DESKTOP_POLICY_ALLOWED_ROOTS = ["~/Downloads", "~/Desktop", "~/Documents", "~/Developer"];
+const DEFAULT_DESKTOP_POLICY_ALLOWED_SHELL_COMMANDS = ["pwd", "ls", "cat", "rg"];
 
-type ToolCallStatus = "queued" | "sent" | "completed" | "failed";
+type ToolCallStatus = "queued" | "awaiting_approval" | "sent" | "completed" | "failed";
 
 type ServerMessage =
   | {
@@ -29,12 +34,27 @@ type ServerMessage =
     input: unknown;
     createdAt: number;
     timeoutMs: number;
+    approval?: DesktopApprovalRequirementView;
   }
   | {
     type: "ack";
-    ackType: "client_hello" | "capabilities_advertise" | "tool_result" | "tool_chunk" | "heartbeat";
+    ackType: "client_hello" | "capabilities_advertise" | "tool_result" | "tool_chunk" | "heartbeat" | "approval_response";
     callId?: string;
     serverTime: number;
+  }
+  | {
+    type: "policy_update";
+    policy: DesktopBridgePolicyView;
+    serverTime: number;
+  }
+  | {
+    type: "approval_request";
+    callId: string;
+    toolName: string;
+    input: unknown;
+    createdAt: number;
+    timeoutMs: number;
+    approval: DesktopApprovalRequirementView;
   }
   | {
     type: "error";
@@ -68,6 +88,51 @@ export type DesktopAdvertisedTool = {
   annotations?: Record<string, unknown>;
 };
 
+export type DesktopApprovalRuleView = {
+  id: string;
+  action: "allow" | "require_approval" | "deny";
+  toolName?: string;
+  toolPrefix?: string;
+  commands?: string[];
+  title?: string;
+  message?: string;
+};
+
+export type DesktopBridgePolicyView = {
+  version: 1;
+  allowedRoots: string[];
+  shell: {
+    allowedCommands: string[];
+  };
+  approvalRules: DesktopApprovalRuleView[];
+};
+
+export type DesktopApprovalRequirementView = {
+  ruleId: string;
+  action: "require_approval";
+  title: string;
+  message: string;
+};
+
+export type DesktopToolCallApprovalView = {
+  status: "required" | "approved" | "denied";
+  requestedAt: number;
+  resolvedAt: number | null;
+  requirement: DesktopApprovalRequirementView;
+};
+
+export type DesktopBridgeEventView = {
+  id: string;
+  kind: string;
+  timestamp: number;
+  workspaceId?: string;
+  deviceId?: string;
+  toolCallId?: string;
+  toolName?: string;
+  status?: string;
+  detail?: Record<string, unknown>;
+};
+
 export type DesktopDeviceView = {
   id: string;
   enrollmentId: string;
@@ -95,6 +160,7 @@ export type DesktopToolCallView = {
   updatedAt: number;
   timeoutMs: number;
   requestedBy: Actor | null;
+  approval?: DesktopToolCallApprovalView;
   result?: unknown;
   error?: {
     code: string;
@@ -138,6 +204,8 @@ type DesktopConnectionRecord = {
 };
 
 type DesktopToolCallRecord = DesktopToolCallView;
+type DesktopApprovalRuleRecord = DesktopApprovalRuleView;
+type DesktopBridgePolicyRecord = DesktopBridgePolicyView;
 
 type DeviceAuth = {
   deviceId: string;
@@ -219,6 +287,113 @@ function parseAllowedRoots(input: unknown): string[] {
     .slice(0, 64);
 }
 
+function parseAllowedCommands(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+    .slice(0, 64);
+}
+
+function normalizeApprovalRule(rule: Partial<DesktopApprovalRuleView> & { id?: string }): DesktopApprovalRuleRecord | null {
+  const action = rule.action;
+  if (action !== "allow" && action !== "require_approval" && action !== "deny") return null;
+  const toolName = readOptionalTrimmedString(rule.toolName);
+  const toolPrefix = readOptionalTrimmedString(rule.toolPrefix);
+  const commands = Array.isArray(rule.commands)
+    ? rule.commands.map((value) => String(value).trim().toLowerCase()).filter(Boolean).slice(0, 32)
+    : undefined;
+  if (!toolName && !toolPrefix) return null;
+  return {
+    id: readOptionalTrimmedString(rule.id) ?? shortId(),
+    action,
+    ...(toolName ? { toolName } : {}),
+    ...(toolPrefix ? { toolPrefix } : {}),
+    ...(commands && commands.length > 0 ? { commands } : {}),
+    ...(readOptionalTrimmedString(rule.title) ? { title: readOptionalTrimmedString(rule.title) } : {}),
+    ...(readOptionalTrimmedString(rule.message) ? { message: readOptionalTrimmedString(rule.message) } : {}),
+  };
+}
+
+function createDefaultDesktopBridgePolicy(): DesktopBridgePolicyRecord {
+  return {
+    version: 1,
+    allowedRoots: [...DEFAULT_DESKTOP_POLICY_ALLOWED_ROOTS],
+    shell: {
+      allowedCommands: [...DEFAULT_DESKTOP_POLICY_ALLOWED_SHELL_COMMANDS],
+    },
+    approvalRules: [
+      {
+        id: "local-shell-exec-approval",
+        action: "require_approval",
+        toolName: "local-shell.exec",
+        title: "Approve local shell command",
+        message: "This action will run a read-only shell command on your computer.",
+      },
+      {
+        id: "local-fs-write-approval",
+        action: "require_approval",
+        toolName: "local-fs.write",
+        title: "Approve local file write",
+        message: "This action will write a local file on your computer.",
+      },
+      {
+        id: "local-fs-patch-approval",
+        action: "require_approval",
+        toolName: "local-fs.patch",
+        title: "Approve local file patch",
+        message: "This action will modify a local file on your computer.",
+      },
+      {
+        id: "local-computer-use-approval",
+        action: "require_approval",
+        toolPrefix: "local-computer-use.",
+        title: "Approve computer control",
+        message: "This action will control your computer directly.",
+      },
+      {
+        id: "local-browser-approval",
+        action: "require_approval",
+        toolPrefix: "local-browser.",
+        title: "Approve browser automation",
+        message: "This action will automate a browser on your computer.",
+      },
+    ],
+  };
+}
+
+function normalizeDesktopBridgePolicy(input?: Partial<DesktopBridgePolicyView>): DesktopBridgePolicyRecord {
+  const defaults = createDefaultDesktopBridgePolicy();
+  const rules = Array.isArray(input?.approvalRules)
+    ? input.approvalRules
+      .map((rule) => normalizeApprovalRule(rule ?? {}))
+      .filter((value): value is DesktopApprovalRuleRecord => Boolean(value))
+    : defaults.approvalRules;
+  return {
+    version: 1,
+    allowedRoots: Array.isArray(input?.allowedRoots) && input.allowedRoots.length > 0
+      ? parseAllowedRoots(input.allowedRoots)
+      : defaults.allowedRoots,
+    shell: {
+      allowedCommands: Array.isArray(input?.shell?.allowedCommands) && input.shell.allowedCommands.length > 0
+        ? parseAllowedCommands(input.shell.allowedCommands)
+        : defaults.shell.allowedCommands,
+    },
+    approvalRules: rules,
+  };
+}
+
+function resolveOpenworkDataDir(): string {
+  const override = process.env.OPENWORK_DATA_DIR?.trim();
+  if (override) return override.startsWith("~/") ? join(homedir(), override.slice(2)) : override;
+  return join(homedir(), ".openwork", "openwork-server");
+}
+
+function desktopBridgeEventsPath(): string {
+  return join(resolveOpenworkDataDir(), "desktop-bridge", "events.jsonl");
+}
+
 function headersToWebHeaders(headers: IncomingHttpHeaders): Headers {
   const result = new Headers();
   for (const [key, value] of Object.entries(headers)) {
@@ -251,6 +426,12 @@ export class DesktopBridgeService {
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  private policy: DesktopBridgePolicyRecord;
+  private eventWriteChain: Promise<void> = Promise.resolve();
+
+  constructor(input?: { policy?: Partial<DesktopBridgePolicyView> }) {
+    this.policy = normalizeDesktopBridgePolicy(input?.policy);
+  }
 
   issueEnrollmentToken(input?: { label?: string; ttlMs?: number }): DesktopEnrollmentTokenIssued {
     const createdAt = Date.now();
@@ -327,6 +508,15 @@ export class DesktopBridgeService {
     this.deviceIdsByTokenHash.set(device.tokenHash, device.id);
     record.claimedAt = now;
     record.claimedByDeviceId = device.id;
+    this.emitEvent({
+      kind: "device_enrolled",
+      deviceId: device.id,
+      detail: {
+        name: device.name,
+        platform: device.platform,
+        arch: device.arch,
+      },
+    });
 
     return {
       device: this.serializeDevice(device),
@@ -347,6 +537,26 @@ export class DesktopBridgeService {
     return Array.from(this.devices.values())
       .map((record) => this.serializeDevice(record))
       .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  }
+
+  async listEvents(input?: { workspaceId?: string; deviceId?: string; limit?: number }): Promise<DesktopBridgeEventView[]> {
+    const path = desktopBridgeEventsPath();
+    if (!(await exists(path))) return [];
+    const content = await readFile(path, "utf8");
+    const lines = content.trim().split("\n").filter(Boolean);
+    const limit = Math.max(1, Math.min(500, Number(input?.limit ?? 100)));
+    const events: DesktopBridgeEventView[] = [];
+    for (let i = lines.length - 1; i >= 0 && events.length < limit; i -= 1) {
+      try {
+        const item = JSON.parse(lines[i]) as DesktopBridgeEventView;
+        if (input?.workspaceId && item.workspaceId !== input.workspaceId) continue;
+        if (input?.deviceId && item.deviceId !== input.deviceId) continue;
+        events.push(item);
+      } catch {
+        // ignore malformed event
+      }
+    }
+    return events;
   }
 
   getDevice(deviceId: string): DesktopDeviceView {
@@ -449,10 +659,19 @@ export class DesktopBridgeService {
     };
     device.lastSeenAt = now;
     const queuedCalls = Array.from(this.toolCalls.values())
-      .filter((call) => call.deviceId === deviceId && call.status === "queued")
+      .filter((call) => call.deviceId === deviceId && (call.status === "queued" || call.status === "awaiting_approval"))
       .sort((a, b) => a.createdAt - b.createdAt);
+    this.emitEvent({
+      kind: "device_connected",
+      workspaceId: device.workspaceId,
+      deviceId: device.id,
+      detail: {
+        connectionId,
+        queuedCalls: queuedCalls.length,
+      },
+    });
     for (const call of queuedCalls) {
-      this.dispatchToolCall(device, call);
+      this.resumePendingCall(device, call);
     }
     return { connectionId, queuedCalls: queuedCalls.map((call) => ({ ...call })) };
   }
@@ -463,6 +682,12 @@ export class DesktopBridgeService {
     if (device.connection.connectionId !== connectionId) return;
     device.connection = null;
     device.lastSeenAt = Date.now();
+    this.emitEvent({
+      kind: "device_disconnected",
+      workspaceId: device.workspaceId,
+      deviceId: device.id,
+      detail: { connectionId },
+    });
   }
 
   acceptClientHello(deviceId: string, connectionId: string): void {
@@ -483,6 +708,15 @@ export class DesktopBridgeService {
     const now = Date.now();
     device.lastSeenAt = now;
     if (device.connection) device.connection.lastSeenAt = now;
+    this.emitEvent({
+      kind: "capabilities_advertised",
+      workspaceId: device.workspaceId,
+      deviceId: device.id,
+      detail: {
+        toolCount: device.tools.length,
+        allowedRoots: device.allowedRoots,
+      },
+    });
     return this.serializeDevice(device);
   }
 
@@ -510,8 +744,34 @@ export class DesktopBridgeService {
       requestedBy: input.requestedBy ?? null,
       chunks: [],
     };
+    const policyDecision = this.evaluatePolicy(call.toolName, call.input);
+    if (policyDecision.denied) {
+      call.status = "failed";
+      call.error = {
+        code: policyDecision.denied.code,
+        message: policyDecision.denied.message,
+      };
+    } else if (policyDecision.approval) {
+      call.status = "awaiting_approval";
+      call.approval = {
+        status: "required",
+        requestedAt: now,
+        resolvedAt: null,
+        requirement: policyDecision.approval,
+      };
+    }
     this.toolCalls.set(call.id, call);
-    this.dispatchToolCall(device, call);
+    this.emitEvent({
+      kind: "tool_call_created",
+      workspaceId: device.workspaceId,
+      deviceId: device.id,
+      toolCallId: call.id,
+      toolName: call.toolName,
+      status: call.status,
+    });
+    if (call.status === "queued" || call.status === "awaiting_approval") {
+      this.resumePendingCall(device, call);
+    }
     return { ...call };
   }
 
@@ -535,6 +795,17 @@ export class DesktopBridgeService {
       .filter((device) => device.workspaceId === workspaceId && device.connection)
       .sort((a, b) => (b.connection?.lastSeenAt ?? b.lastSeenAt) - (a.connection?.lastSeenAt ?? a.lastSeenAt))[0];
     return record ? this.serializeDevice(record) : null;
+  }
+
+  getPolicy(): DesktopBridgePolicyView {
+    return {
+      version: 1,
+      allowedRoots: [...this.policy.allowedRoots],
+      shell: {
+        allowedCommands: [...this.policy.shell.allowedCommands],
+      },
+      approvalRules: this.policy.approvalRules.map((rule) => ({ ...rule })),
+    };
   }
 
   async callWorkspaceTool(input: {
@@ -569,6 +840,64 @@ export class DesktopBridgeService {
       const status = code === "tool_call_timeout" ? 504 : 502;
       throw new ApiError(status, code, error instanceof Error ? error.message : String(error));
     }
+  }
+
+  applyApprovalResponse(
+    deviceId: string,
+    connectionId: string,
+    callId: string,
+    input: { approved?: boolean; reason?: unknown },
+  ): DesktopToolCallView {
+    const device = this.requireConnectedDevice(deviceId, connectionId);
+    const call = this.requireToolCallForDevice(deviceId, callId);
+    if (!call.approval || call.approval.status !== "required") {
+      throw new ApiError(409, "approval_not_pending", "Desktop approval is not pending for this tool call");
+    }
+    const now = Date.now();
+    if (input.approved === true) {
+      call.approval = {
+        ...call.approval,
+        status: "approved",
+        resolvedAt: now,
+      };
+      call.status = "queued";
+      call.updatedAt = now;
+      this.resumePendingCall(device, call);
+      this.emitEvent({
+        kind: "approval_resolved",
+        workspaceId: device.workspaceId,
+        deviceId: device.id,
+        toolCallId: call.id,
+        toolName: call.toolName,
+        status: "approved",
+      });
+      return { ...call };
+    }
+    call.approval = {
+      ...call.approval,
+      status: "denied",
+      resolvedAt: now,
+    };
+    call.status = "failed";
+    call.updatedAt = now;
+    call.error = {
+      code: "tool_call_denied",
+      message: readOptionalTrimmedString(input.reason) ?? "Desktop tool call was denied by the user",
+    };
+    delete call.result;
+    this.emitEvent({
+      kind: "approval_resolved",
+      workspaceId: device.workspaceId,
+      deviceId: device.id,
+      toolCallId: call.id,
+      toolName: call.toolName,
+      status: "denied",
+      detail: {
+        reason: call.error.message,
+      },
+    });
+    this.finishToolCall(call);
+    return { ...call };
   }
 
   appendToolChunk(
@@ -755,7 +1084,101 @@ export class DesktopBridgeService {
       input: call.input,
       createdAt: call.createdAt,
       timeoutMs: call.timeoutMs,
+      ...(call.approval?.requirement ? { approval: call.approval.requirement } : {}),
     });
+    this.emitEvent({
+      kind: "tool_call_dispatched",
+      workspaceId: device.workspaceId,
+      deviceId: device.id,
+      toolCallId: call.id,
+      toolName: call.toolName,
+      status: call.status,
+    });
+  }
+
+  private requestApproval(device: DesktopDeviceRecord, call: DesktopToolCallRecord): void {
+    if (!device.connection || !call.approval) return;
+    call.status = "awaiting_approval";
+    call.updatedAt = Date.now();
+    device.connection.send({
+      type: "approval_request",
+      callId: call.id,
+      toolName: call.toolName,
+      input: call.input,
+      createdAt: call.createdAt,
+      timeoutMs: call.timeoutMs,
+      approval: call.approval.requirement,
+    });
+    this.emitEvent({
+      kind: "approval_requested",
+      workspaceId: device.workspaceId,
+      deviceId: device.id,
+      toolCallId: call.id,
+      toolName: call.toolName,
+      status: call.status,
+      detail: {
+        ruleId: call.approval.requirement.ruleId,
+      },
+    });
+  }
+
+  private resumePendingCall(device: DesktopDeviceRecord, call: DesktopToolCallRecord): void {
+    if (call.status === "completed" || call.status === "failed") return;
+    if (call.approval?.status === "required") {
+      this.requestApproval(device, call);
+      return;
+    }
+    this.dispatchToolCall(device, call);
+  }
+
+  private evaluatePolicy(toolName: string, input: unknown): {
+    denied?: { code: string; message: string };
+    approval?: DesktopApprovalRequirementView;
+  } {
+    const normalizedToolName = sanitizeToolName(toolName);
+    if (normalizedToolName === "local-shell.exec") {
+      const record = ensurePlainObject(input);
+      const command = readOptionalTrimmedString(record.command)?.toLowerCase() ?? "";
+      if (!command || !this.policy.shell.allowedCommands.includes(command)) {
+        return {
+          denied: {
+            code: "command_not_allowed_by_server_policy",
+            message: `Command is not allowed by server policy: ${command || "unknown"}`,
+          },
+        };
+      }
+    }
+
+    const matchingRule = this.policy.approvalRules.find((rule) => {
+      const exactMatch = rule.toolName ? rule.toolName === normalizedToolName : false;
+      const prefixMatch = rule.toolPrefix ? normalizedToolName.startsWith(rule.toolPrefix) : false;
+      if (!exactMatch && !prefixMatch) return false;
+      if (!rule.commands || rule.commands.length === 0) return true;
+      const record = ensurePlainObject(input);
+      const command = readOptionalTrimmedString(record.command)?.toLowerCase() ?? "";
+      return Boolean(command) && rule.commands.includes(command);
+    });
+
+    if (!matchingRule) return {};
+    if (matchingRule.action === "deny") {
+      return {
+        denied: {
+          code: "tool_denied_by_server_policy",
+          message: matchingRule.message ?? `Tool is denied by server policy: ${normalizedToolName}`,
+        },
+      };
+    }
+    if (matchingRule.action === "require_approval") {
+      return {
+        approval: {
+          ruleId: matchingRule.id,
+          action: "require_approval",
+          title: matchingRule.title ?? `Approve ${normalizedToolName}`,
+          message: matchingRule.message ?? "This desktop action requires approval.",
+        },
+      };
+    }
+    return {};
   }
 
   private waitForToolCall(callId: string, timeoutMs: number): Promise<DesktopToolCallView> {
@@ -784,6 +1207,18 @@ export class DesktopBridgeService {
   }
 
   private finishToolCall(call: DesktopToolCallRecord): void {
+    const device = this.devices.get(call.deviceId);
+    this.emitEvent({
+      kind: "tool_call_completed",
+      workspaceId: device?.workspaceId,
+      deviceId: call.deviceId,
+      toolCallId: call.id,
+      toolName: call.toolName,
+      status: call.status,
+      detail: call.error
+        ? { errorCode: call.error.code, errorMessage: call.error.message }
+        : undefined,
+    });
     const waiter = this.toolCallWaiters.get(call.id);
     if (!waiter) return;
     this.toolCallWaiters.delete(call.id);
@@ -796,6 +1231,21 @@ export class DesktopBridgeService {
       return;
     }
     waiter.resolve({ ...call });
+  }
+
+  private emitEvent(input: Omit<DesktopBridgeEventView, "id" | "timestamp">): void {
+    const event: DesktopBridgeEventView = {
+      id: shortId(),
+      timestamp: Date.now(),
+      ...input,
+    };
+    this.eventWriteChain = this.eventWriteChain
+      .then(async () => {
+        const path = desktopBridgeEventsPath();
+        await ensureDir(dirname(path));
+        await appendFile(path, JSON.stringify(event) + "\n", "utf8");
+      })
+      .catch(() => undefined);
   }
 }
 
@@ -853,6 +1303,11 @@ export function createDesktopBridgeUpgradeHandler(
         deviceId: auth.deviceId,
         serverTime: Date.now(),
       });
+      sendSocketJson(ws, {
+        type: "policy_update",
+        policy: bridge.getPolicy(),
+        serverTime: Date.now(),
+      });
     }
 
     ws.on("message", (data: unknown) => {
@@ -882,6 +1337,11 @@ export function createDesktopBridgeUpgradeHandler(
                 deviceId: connected.device.id,
                 serverTime: Date.now(),
               });
+              sendSocketJson(ws, {
+                type: "policy_update",
+                policy: bridge.getPolicy(),
+                serverTime: Date.now(),
+              });
               sendSocketJson(ws, { type: "ack", ackType: "client_hello", serverTime: Date.now() });
               break;
             }
@@ -891,6 +1351,23 @@ export function createDesktopBridgeUpgradeHandler(
           case "capabilities_advertise":
             bridge.advertiseTools(context.deviceId, context.connectionId, payload.tools, payload.allowedRoots);
             sendSocketJson(ws, { type: "ack", ackType: "capabilities_advertise", serverTime: Date.now() });
+            break;
+          case "approval_response":
+            bridge.applyApprovalResponse(
+              context.deviceId,
+              context.connectionId,
+              readRequiredTrimmedString(payload.callId, "callId is required"),
+              {
+                approved: payload.approved === true,
+                reason: payload.reason,
+              },
+            );
+            sendSocketJson(ws, {
+              type: "ack",
+              ackType: "approval_response",
+              callId: readRequiredTrimmedString(payload.callId, "callId is required"),
+              serverTime: Date.now(),
+            });
             break;
           case "tool_started":
             sendSocketJson(ws, {

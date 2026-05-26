@@ -17,7 +17,11 @@ With this feature in place, a remote OpenWork session can use desktop-hosted too
 
 - `local-fs.list`
 - `local-fs.read`
+- `local-fs.write`
+- `local-fs.patch`
 - `local-shell.exec`
+- `local-browser.*`
+- `local-computer-use.*`
 
 The key proof is that a natural-language prompt asking for the Downloads folder was successfully answered from the real macOS path on the employee machine instead of the Kubernetes pod.
 
@@ -128,11 +132,22 @@ Primary implementation:
 
 ### 5. Local tool adapters on the desktop
 
-The current desktop toolset is intentionally limited:
+The current desktop toolset is intentionally limited, but it now includes:
 
 - `local-fs.list`
 - `local-fs.read`
+- `local-fs.write`
+- `local-fs.patch`
 - `local-shell.exec`
+- `local-browser.open`
+- `local-browser.navigate`
+- `local-browser.state`
+- `local-browser.close`
+- `local-computer-use.permissions`
+- `local-computer-use.snapshot`
+- `local-computer-use.click`
+- `local-computer-use.type_text`
+- `local-computer-use.press_key`
 
 `local-shell.exec` is restricted to:
 
@@ -164,6 +179,40 @@ Primary implementation:
 
 - [apps/app/src/react-app/shell/desktop-local-openwork.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/app/src/react-app/shell/desktop-local-openwork.ts)
 - [apps/app/src/react-app/shell/session-route.tsx](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/app/src/react-app/shell/session-route.tsx)
+
+### 8. Phase 2 MVP: server policy and desktop approvals
+
+The bridge now has a minimal Phase 2 policy path:
+
+- the worker publishes a desktop bridge policy to the client over the existing WebSocket
+- the desktop client rebuilds its local tool adapter using that server policy
+- selected tools can be held behind an approval prompt before execution
+
+Current default behavior:
+
+- `local-shell.exec` requires desktop approval
+- `local-fs.write` requires desktop approval
+- `local-fs.patch` requires desktop approval
+- `local-computer-use.*` requires approval
+- `local-browser.*` requires approval
+- server policy restricts shell commands to `pwd`, `ls`, `cat`, `rg`
+
+### 9. Phase 3 MVP: persisted bridge events
+
+Bridge lifecycle and tool-call events are now persisted as append-only JSONL records on the worker, and exposed through status/event APIs for the connected workspace.
+
+Primary implementation:
+
+- [apps/server/src/desktop-bridge.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/desktop-bridge.ts)
+- [apps/server/src/server.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/server.ts)
+
+Primary implementation:
+
+- [apps/server/src/desktop-bridge.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/desktop-bridge.ts)
+- [apps/server/src/server.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/server.ts)
+- [apps/desktop/electron/desktop-bridge-client.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/desktop-bridge-client.mjs)
+- [apps/desktop/electron/desktop-local-tools.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/desktop-local-tools.mjs)
+- [apps/desktop/electron/main.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/main.mjs)
 
 ## End-to-End Proof
 
@@ -197,6 +246,11 @@ It should **not** inspect:
 - the worker saw the device and approved roots
 - the prompt was answered using `openwork-desktop-bridge_local-fs-list`
 - the tool input used the real local path on the Mac
+- `local-fs.write` created a real file in `/Users/rameshpilli/Downloads`
+- `local-fs.patch` modified that file in place
+- `local-browser.open` and `local-browser.state` opened and inspected `https://example.com/`
+- `local-computer-use.permissions` and `local-computer-use.snapshot` ran through the bridge and correctly surfaced remaining OS permission requirements
+- approval and tool lifecycle events were persisted on the worker
 
 ## User Experience
 
@@ -262,14 +316,13 @@ This POC proves the architecture, but it is **not** ready for broad enterprise r
 
 ### Missing production controls
 
-- No approval prompts for risky actions
-- No write-capable local tools with guardrails
-- No browser/computer-use bridge in the production path
 - No separate desktop enrollment token lifecycle
 - No SSO
-- No durable audit/event pipeline
+- No operator-facing health/audit UI
+- No durable database-backed audit/event pipeline beyond append-only JSONL
 - No device management or revocation UX
 - No mature multi-device arbitration for one user with multiple machines
+- No full policy engine for per-user/per-role rules beyond the current static server policy
 
 ### Important security limitation
 
@@ -332,6 +385,53 @@ The following statement is **not** accurate yet:
    - `Read /Users/<username>/Downloads/<file>`
    - `Search /Users/<username>/Developer for TODO`
 
+### Optional server policy env vars
+
+The current Phase 2 MVP supports these server-side env overrides:
+
+- `OPENWORK_DESKTOP_BRIDGE_ALLOWED_ROOTS`
+  - comma-separated list
+  - default: `~/Downloads,~/Desktop,~/Documents,~/Developer`
+- `OPENWORK_DESKTOP_BRIDGE_ALLOWED_COMMANDS`
+  - comma-separated list
+  - default: `pwd,ls,cat,rg`
+
+Example:
+
+```bash
+OPENWORK_DESKTOP_BRIDGE_ALLOWED_ROOTS='~/Downloads,~/Developer' \
+OPENWORK_DESKTOP_BRIDGE_ALLOWED_COMMANDS='pwd,ls,rg'
+```
+
+### POC test credentials used during validation
+
+These were the exact development values used for the successful local proof:
+
+- Worker URL: `http://127.0.0.1:18788`
+- Access token: `openwork-client-demo-token`
+- Display name: `kind-openwork-test`
+
+This token is a static bearer token for the current POC environment. It is included here only so the exact reproduction setup is recorded.
+
+It is **not** the intended long-term production auth model.
+
+## Token model in this POC
+
+The current POC uses the remote worker token as the desktop bridge enrollment token.
+
+That means:
+
+- the user pastes one token into `Connect custom remote`
+- the desktop app uses that same token to attach to the remote workspace
+- the desktop bridge also reuses that same token to authenticate the reverse bridge connection
+
+This is convenient for testing, but it is not strong enough for production because it does not provide:
+
+- separate device identity
+- token expiry and rotation
+- device-scoped revocation
+- distinct user/session/device credentials
+
 ## Production-oriented deployment target
 
 1. Deploy the worker behind a stable HTTPS URL.
@@ -339,6 +439,39 @@ The following statement is **not** accurate yet:
 3. Distribute the desktop app through managed IT channels if possible.
 4. Prefer prefilled server URL or managed configuration over asking users to type it manually.
 5. Add approval and audit before enabling anything beyond read-only local access.
+
+## Platform support
+
+### What is proven today
+
+This feature was validated on macOS.
+
+### Windows support status
+
+The architecture itself can support Windows because the major building blocks are cross-platform:
+
+- Electron desktop app
+- outbound WebSocket bridge
+- Node-based local file access
+- remote worker-side MCP proxy
+
+However, the current POC is not yet a turn-key Windows implementation.
+
+Reasons:
+
+- `local-shell.exec` currently assumes Unix-style commands such as `pwd`, `ls`, and `cat`
+- the default tested paths and prompts were written around macOS paths such as `/Users/<username>/Downloads`
+- Windows-specific shell behavior and path conventions have not been validated yet
+
+### Practical interpretation
+
+- `local-fs.list` and `local-fs.read` are likely portable with Windows-specific root configuration
+- `local-shell.exec` needs a Windows command strategy before calling this Windows-ready
+- browser/computer-use support would need separate Windows validation later
+
+So the right statement is:
+
+> The bridge design is cross-platform in principle, but this POC is only proven on macOS right now.
 
 ## Open Source Proposal Notes
 
@@ -371,3 +504,38 @@ If you deploy only stock OpenWork in Kubernetes and hand users a URL and token, 
 With this bridge feature, the same UI flow can reach back to the user machine for limited local actions.
 
 That means the idea is correct, the implementation path is real, and the next work is product hardening rather than architectural reinvention.
+
+## Delivery Checklist
+
+### Done now
+
+- Remote worker can register a connected desktop over one outbound WebSocket bridge
+- Worker injects a bridge-backed MCP tool source into the remote workspace
+- Desktop advertises local tools to the worker
+- `local-fs.list` and `local-fs.read` work on the real employee machine
+- `local-fs.write` and `local-fs.patch` work on the real employee machine
+- `local-browser.open`, `local-browser.navigate`, `local-browser.state`, and `local-browser.close` work through the bridge
+- `local-computer-use.*` is wired through the bridge and participates in policy/approval flow
+- Server-driven approval prompts exist for shell, write/patch, browser, and computer-use actions
+- Allowed roots and allowed shell commands are enforced from server policy
+- Bridge events and approval lifecycle are persisted to append-only JSONL on the worker
+- Workspace APIs expose bridge status and recent events
+
+### Required before a pilot rollout
+
+- Replace the hardcoded/static pilot token model with per-user or per-device issued credentials
+- Add a simple operator runbook for token rotation, device reset, and worker restart
+- Decide the initial server policy profile for each pilot user group
+- Verify macOS permission onboarding for Accessibility and Screen Recording on target laptops
+- Add a small operator check for connected device, last-seen timestamp, and recent bridge errors
+
+### Required before production
+
+- SSO-backed device enrollment and device-scoped credential rotation/revocation
+- Database-backed audit/event persistence instead of JSONL only
+- Real admin/device management UI
+- Explicit multi-user and multi-device routing semantics
+- High-availability-safe bridge connection routing across multiple worker replicas
+- Stronger approval UX and policy model with per-user/per-role rules
+- Windows implementation and validation if Windows endpoints are in scope
+- Browser/computer-use hardening and OS permission first-run UX
