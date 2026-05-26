@@ -156,7 +156,7 @@ async function main() {
   const outDir = await ensureDir(
     path.resolve(readArg("--outdir", path.join(desktopRoot, "dist-electron", "smoke-artifacts"))),
   );
-  const userDataDir = await ensureDir(path.join(os.tmpdir(), "openwork-electron-smoke"));
+  const userDataDir = await ensureDir(path.join(os.tmpdir(), `openwork-electron-smoke-${Date.now()}`));
   const isolatedHome = await ensureDir(path.join(userDataDir, "home"));
   const remoteConfig = {
     workerUrl: nonEmpty(process.env.OPENWORK_TEST_WORKER_URL ?? readArg("--worker-url")),
@@ -173,11 +173,13 @@ async function main() {
       OPENWORK_DEV_MODE: process.env.OPENWORK_DEV_MODE || "1",
       OPENWORK_ALLOW_MULTI_INSTANCE: "1",
       OPENWORK_ELECTRON_REMOTE_DEBUG_PORT: process.env.OPENWORK_ELECTRON_REMOTE_DEBUG_PORT || "0",
-      HOME: isolatedHome,
-      USERPROFILE: isolatedHome,
-      APPDATA: isolatedHome,
-      LOCALAPPDATA: isolatedHome,
-      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || userDataDir,
+      OPENWORK_ELECTRON_USERDATA: path.join(userDataDir, "userdata"),
+      ...(process.platform === "win32"
+        ? {}
+        : {
+            HOME: isolatedHome,
+            XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || userDataDir,
+          }),
     },
   });
 

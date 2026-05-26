@@ -62,6 +62,12 @@ jobs:
 
       - name: Capture Windows UI smoke screenshots
         if: runner.os == 'Windows'
+        env:
+          OPENWORK_TEST_WORKER_URL: ${{ secrets.OPENWORK_TEST_WORKER_URL }}
+          OPENWORK_TEST_WORKER_TOKEN: ${{ secrets.OPENWORK_TEST_WORKER_TOKEN }}
+          OPENWORK_TEST_WORKER_NAME: ${{ secrets.OPENWORK_TEST_WORKER_NAME }}
+          OPENWORK_TEST_PROMPT: ${{ secrets.OPENWORK_TEST_PROMPT }}
+          OPENWORK_TEST_EXPECT_TEXT: ${{ secrets.OPENWORK_TEST_EXPECT_TEXT }}
         run: pnpm --filter @openwork/desktop smoke:screenshot -- --outdir dist-electron/smoke-artifacts
 
       - name: Build installer
