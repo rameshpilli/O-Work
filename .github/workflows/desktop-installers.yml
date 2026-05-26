@@ -70,10 +70,18 @@ jobs:
           OPENWORK_TEST_EXPECT_TEXT: ${{ secrets.OPENWORK_TEST_EXPECT_TEXT }}
         run: pnpm --filter @openwork/desktop smoke:screenshot -- --outdir dist-electron/smoke-artifacts
 
+      - name: Upload Windows smoke artifacts
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwork-windows-smoke-artifacts
+          path: apps/desktop/dist-electron/smoke-artifacts/**
+
       - name: Build installer
         run: pnpm --dir apps/desktop exec electron-builder --config electron-builder.yml --publish never
 
       - name: Upload installer artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: openwork-${{ matrix.artifact }}
