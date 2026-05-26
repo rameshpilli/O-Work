@@ -151,6 +151,30 @@ The Windows artifact now also includes:
 - `smoke-artifacts/windows-ui-smoke.json`
 - `smoke-artifacts/windows-ui-smoke.txt`
 
+### Optional remote-worker UI smoke
+
+Added a second Windows-only workflow for true UI-to-worker validation:
+
+- [.github/workflows/windows-remote-ui-smoke.yml](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/.github/workflows/windows-remote-ui-smoke.yml)
+
+This workflow is manual and expects GitHub secrets:
+
+- `OPENWORK_TEST_WORKER_URL`
+- `OPENWORK_TEST_WORKER_TOKEN`
+- `OPENWORK_TEST_WORKER_NAME` (optional)
+- `OPENWORK_TEST_PROMPT`
+- `OPENWORK_TEST_EXPECT_TEXT` (optional)
+
+What it does:
+
+1. launches the Windows Electron app
+2. opens `Add a worker`
+3. connects `Connect custom remote`
+4. fills the worker URL/token from secrets
+5. opens or creates a session
+6. sends a prompt
+7. captures screenshots and a JSON/text run report
+
 ### What users should eventually download
 
 - macOS users: `.dmg`

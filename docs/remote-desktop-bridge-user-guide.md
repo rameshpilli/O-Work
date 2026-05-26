@@ -201,3 +201,17 @@ It uploads:
 - Windows UI smoke screenshots and a shell snapshot report
 
 The user can install the desktop app first and add the remote worker URL and token later through the UI.
+
+## Windows CI verification
+
+There are now two Windows-oriented CI paths:
+
+1. `Desktop Installers`
+   - builds the Windows installer
+   - captures first-run UI smoke screenshots
+
+2. `Windows Remote UI Smoke`
+   - manual workflow
+   - requires a real worker URL/token in GitHub secrets
+   - drives the actual `Connect custom remote` flow in the Electron UI
+   - can send a prompt and capture result screenshots

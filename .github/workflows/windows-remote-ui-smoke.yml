@@ -1,0 +1,56 @@
+name: Windows Remote UI Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-remote-ui-smoke:
+    runs-on: windows-latest
+    env:
+      OPENWORK_TEST_WORKER_URL: ${{ secrets.OPENWORK_TEST_WORKER_URL }}
+      OPENWORK_TEST_WORKER_TOKEN: ${{ secrets.OPENWORK_TEST_WORKER_TOKEN }}
+      OPENWORK_TEST_WORKER_NAME: ${{ secrets.OPENWORK_TEST_WORKER_NAME }}
+      OPENWORK_TEST_PROMPT: ${{ secrets.OPENWORK_TEST_PROMPT }}
+      OPENWORK_TEST_EXPECT_TEXT: ${{ secrets.OPENWORK_TEST_EXPECT_TEXT }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      - name: Validate required test secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${OPENWORK_TEST_WORKER_URL:?Missing OPENWORK_TEST_WORKER_URL}"
+          : "${OPENWORK_TEST_WORKER_TOKEN:?Missing OPENWORK_TEST_WORKER_TOKEN}"
+          : "${OPENWORK_TEST_PROMPT:?Missing OPENWORK_TEST_PROMPT}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build desktop bundle
+        run: pnpm --filter @openwork/desktop build:electron
+
+      - name: Run Windows remote UI smoke
+        run: pnpm --filter @openwork/desktop smoke:screenshot -- --outdir dist-electron/remote-smoke
+
+      - name: Upload Windows remote smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwork-windows-remote-ui-smoke
+          path: apps/desktop/dist-electron/remote-smoke/**
