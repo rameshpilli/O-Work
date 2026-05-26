@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
 import { appendFile, mkdir, stat, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_LIST_LIMIT = 500;
 const DEFAULT_ALLOWED_COMMANDS = Object.freeze(["pwd", "ls", "cat", "rg"]);
+const SUPPORTED_SHELL_COMMANDS = new Set(DEFAULT_ALLOWED_COMMANDS);
 
 function trim(value) {
   return String(value ?? "").trim();
@@ -107,166 +107,162 @@ function normalizeFlags(flags, allowlist) {
   return normalized;
 }
 
-function buildLsInvocation(input, cwd) {
-  const paths = Array.isArray(input?.paths) && input.paths.length > 0 ? input.paths : ["."];
-  const flags = [];
-  if (input?.all === true) flags.push("-a");
-  if (input?.long === true) flags.push("-l");
-  return { command: "ls", args: [...flags, ...paths], cwd };
-}
-
-function buildCatInvocation(input, cwd) {
-  const paths = Array.isArray(input?.paths) ? input.paths.map((entry) => trim(entry)).filter(Boolean) : [];
-  if (paths.length === 0) {
-    throw codeError("local-shell.exec cat requires at least one path", "INVALID_INPUT");
-  }
-  return { command: "cat", args: paths, cwd };
-}
-
-function buildPwdInvocation(_input, cwd) {
-  return { command: "pwd", args: [], cwd };
-}
-
-function buildRgInvocation(input, cwd) {
-  const pattern = trim(input?.pattern);
-  if (!pattern) {
-    throw codeError("local-shell.exec rg requires a non-empty pattern", "INVALID_INPUT");
-  }
-  const paths = Array.isArray(input?.paths) && input.paths.length > 0 ? input.paths.map((entry) => trim(entry)).filter(Boolean) : ["."];
-  const flags = normalizeFlags(input?.flags, new Set(["-n", "--hidden", "-i", "-S", "-uu"]));
-  return { command: "rg", args: [...flags, pattern, ...paths], cwd };
-}
-
-const SHELL_BUILDERS = {
-  pwd: buildPwdInvocation,
-  ls: buildLsInvocation,
-  cat: buildCatInvocation,
-  rg: buildRgInvocation,
-};
-
 function limitTextChunks(text, maxBytes) {
   const value = String(text ?? "");
   return Buffer.byteLength(value, "utf8") <= maxBytes ? value : value.slice(0, maxBytes);
 }
 
-async function executeShellCommand(invocation, options, hooks = {}) {
-  const cwdResolved = await resolveSecurePath(invocation.cwd || options.defaultRoot, {
-    homeDir: options.homeDir,
-    cwd: options.defaultRoot,
-    allowedRoots: options.allowedRoots,
-    mustExist: true,
-    expect: "directory",
-  });
-  const args = [];
-  if (invocation.command === "ls") {
-    for (const arg of invocation.args) {
-      if (arg.startsWith("-")) {
-        args.push(arg);
-        continue;
-      }
-      const resolved = await resolveSecurePath(arg, {
-        homeDir: options.homeDir,
-        cwd: cwdResolved.path,
-        allowedRoots: options.allowedRoots,
-        mustExist: true,
-      });
-      args.push(resolved.path);
-    }
-  } else if (invocation.command === "cat") {
-    for (const arg of invocation.args) {
-      const resolved = await resolveSecurePath(arg, {
-        homeDir: options.homeDir,
-        cwd: cwdResolved.path,
-        allowedRoots: options.allowedRoots,
-        mustExist: true,
-        expect: "file",
-      });
-      args.push(resolved.path);
-    }
-  } else if (invocation.command === "rg") {
-    let positionalIndex = 0;
-    for (const arg of invocation.args) {
-      if (arg.startsWith("-")) {
-        args.push(arg);
-        continue;
-      }
-      if (positionalIndex === 0) {
-        args.push(arg);
-      } else {
-        const resolved = await resolveSecurePath(arg, {
-          homeDir: options.homeDir,
-          cwd: cwdResolved.path,
-          allowedRoots: options.allowedRoots,
-          mustExist: true,
-        });
-        args.push(resolved.path);
-      }
-      positionalIndex += 1;
-    }
-  } else {
-    args.push(...invocation.args);
+function shellResult(command, cwd, stdout = "", stderr = "", exitCode = 0) {
+  return {
+    command,
+    args: [],
+    cwd,
+    exitCode,
+    signal: null,
+    stdout,
+    stderr,
+  };
+}
+
+async function resolveShellPaths(rawPaths, cwd, options, expect = null) {
+  const values = Array.isArray(rawPaths) && rawPaths.length > 0 ? rawPaths : ["."];
+  const resolved = [];
+  for (const value of values) {
+    const entry = await resolveSecurePath(value, {
+      homeDir: options.homeDir,
+      cwd,
+      allowedRoots: options.allowedRoots,
+      mustExist: true,
+      ...(expect ? { expect } : {}),
+    });
+    resolved.push(entry);
   }
+  return resolved;
+}
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(invocation.command, args, {
-      cwd: cwdResolved.path,
-      shell: false,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
+function formatLsLongEntry(info) {
+  const type = info.type === "directory" ? "d" : info.type === "file" ? "-" : "?";
+  const size = String(info.size ?? 0).padStart(10, " ");
+  const modified = info.modifiedMs ? new Date(info.modifiedMs).toISOString() : "";
+  return `${type} ${size} ${modified} ${info.name}`;
+}
 
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      const error = codeError(`Command timed out after ${options.shellTimeoutMs}ms`, "COMMAND_TIMEOUT");
-      if (!settled) {
-        settled = true;
-        reject(error);
+async function executePwd(cwd, hooks = {}) {
+  const stdout = `${cwd}\n`;
+  hooks.onStdout?.(stdout);
+  return shellResult("pwd", cwd, stdout);
+}
+
+async function executeLs(toolInput, cwd, options, hooks = {}) {
+  const targets = await resolveShellPaths(toolInput?.paths, cwd, options, null);
+  const lines = [];
+  for (const target of targets) {
+    if (target.stat?.isDirectory()) {
+      const entries = await readdir(target.path, { withFileTypes: true });
+      const visible = entries.filter((entry) => toolInput?.all === true || !entry.name.startsWith("."));
+      if (targets.length > 1) lines.push(`${target.path}:`);
+      for (const entry of visible) {
+        const childPath = path.join(target.path, entry.name);
+        const info = await stat(childPath).catch(() => null);
+        const detail = {
+          name: entry.name,
+          path: childPath,
+          type: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other",
+          size: info?.size ?? null,
+          modifiedMs: info?.mtimeMs ?? null,
+        };
+        lines.push(toolInput?.long === true ? formatLsLongEntry(detail) : entry.name);
       }
-    }, options.shellTimeoutMs);
+    } else {
+      const detail = {
+        name: path.basename(target.path),
+        path: target.path,
+        type: "file",
+        size: target.stat?.size ?? null,
+        modifiedMs: target.stat?.mtimeMs ?? null,
+      };
+      lines.push(toolInput?.long === true ? formatLsLongEntry(detail) : detail.name);
+    }
+  }
+  const stdout = lines.join("\n") + (lines.length > 0 ? "\n" : "");
+  hooks.onStdout?.(stdout);
+  return shellResult("ls", cwd, stdout);
+}
 
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve(result);
-    };
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(error);
-    };
+async function executeCat(toolInput, cwd, options, hooks = {}) {
+  const targets = await resolveShellPaths(toolInput?.paths, cwd, options, "file");
+  if (targets.length === 0) {
+    throw codeError("local-shell.exec cat requires at least one path", "INVALID_INPUT");
+  }
+  const chunks = [];
+  for (const target of targets) {
+    chunks.push(await readFile(target.path, "utf8"));
+  }
+  const stdout = chunks.join("");
+  hooks.onStdout?.(stdout);
+  return shellResult("cat", cwd, limitTextChunks(stdout, options.maxStdoutBytes));
+}
 
-    child.on("error", (error) => {
-      const spawnError = /** @type {Error & { code?: string }} */ (error);
-      fail(Object.assign(spawnError, { code: spawnError.code || "COMMAND_SPAWN_FAILED" }));
-    });
+function createRgMatcher(pattern, flags) {
+  const caseInsensitive = flags.includes("-i") || (flags.includes("-S") && pattern.toLowerCase() === pattern);
+  try {
+    return new RegExp(pattern, caseInsensitive ? "gi" : "g");
+  } catch {
+    throw codeError(`Invalid rg pattern: ${pattern}`, "INVALID_INPUT");
+  }
+}
 
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout = limitTextChunks(stdout + chunk, options.maxStdoutBytes);
-      hooks.onStdout?.(String(chunk));
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr = limitTextChunks(stderr + chunk, options.maxStderrBytes);
-      hooks.onStderr?.(String(chunk));
-    });
-    child.on("close", (code, signal) => {
-      finish({
-        command: invocation.command,
-        args,
-        cwd: cwdResolved.path,
-        exitCode: Number.isInteger(code) ? code : null,
-        signal: signal ?? null,
-        stdout,
-        stderr,
-      });
-    });
-  });
+async function collectSearchFiles(target, includeHidden, results = []) {
+  if (target.stat?.isFile()) {
+    results.push(target.path);
+    return results;
+  }
+  const entries = await readdir(target.path, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!includeHidden && entry.name.startsWith(".")) continue;
+    const childPath = path.join(target.path, entry.name);
+    const childStat = await stat(childPath).catch(() => null);
+    if (!childStat) continue;
+    if (childStat.isDirectory()) {
+      await collectSearchFiles({ path: childPath, stat: childStat }, includeHidden, results);
+    } else if (childStat.isFile()) {
+      results.push(childPath);
+    }
+  }
+  return results;
+}
+
+async function executeRg(toolInput, cwd, options, hooks = {}) {
+  const pattern = trim(toolInput?.pattern);
+  if (!pattern) {
+    throw codeError("local-shell.exec rg requires a non-empty pattern", "INVALID_INPUT");
+  }
+  const flags = normalizeFlags(toolInput?.flags, new Set(["-n", "--hidden", "-i", "-S", "-uu"]));
+  const includeHidden = flags.includes("--hidden") || flags.includes("-uu");
+  const targets = await resolveShellPaths(toolInput?.paths, cwd, options, null);
+  const matcher = createRgMatcher(pattern, flags);
+  const matches = [];
+  for (const target of targets) {
+    const files = await collectSearchFiles(target, includeHidden);
+    for (const filePath of files) {
+      let content = "";
+      try {
+        content = await readFile(filePath, "utf8");
+      } catch {
+        continue;
+      }
+      const lines = content.split(/\r?\n/);
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        matcher.lastIndex = 0;
+        if (!matcher.test(line)) continue;
+        matches.push(flags.includes("-n") ? `${filePath}:${index + 1}:${line}` : `${filePath}:${line}`);
+      }
+    }
+  }
+  const stdout = limitTextChunks(matches.join("\n") + (matches.length > 0 ? "\n" : ""), options.maxStdoutBytes);
+  hooks.onStdout?.(stdout);
+  return shellResult("rg", cwd, stdout, "", matches.length > 0 ? 0 : 1);
 }
 
 export async function createDesktopLocalToolAdapter(input = {}) {
@@ -278,7 +274,7 @@ export async function createDesktopLocalToolAdapter(input = {}) {
       ? input.allowedCommands
       : DEFAULT_ALLOWED_COMMANDS)
       .map((entry) => trim(entry).toLowerCase())
-      .filter((entry) => entry && SHELL_BUILDERS[entry]),
+      .filter((entry) => entry && SUPPORTED_SHELL_COMMANDS.has(entry)),
   );
   const limits = {
     maxReadBytes: toInteger(input?.limits?.maxReadBytes, 256 * 1024),
@@ -437,19 +433,34 @@ export async function createDesktopLocalToolAdapter(input = {}) {
     if (!allowedCommandSet.has(command)) {
       throw codeError(`Command is not allowed by policy: ${toolInput.command}`, "COMMAND_NOT_ALLOWED");
     }
-    const builder = SHELL_BUILDERS[command];
-    if (!builder) {
-      throw codeError(`Command is not allowed: ${toolInput.command}`, "COMMAND_NOT_ALLOWED");
-    }
-    const invocation = builder(toolInput, defaultRoot);
-    return executeShellCommand(invocation, {
+    const cwdResolved = await resolveSecurePath(toolInput.cwd || defaultRoot, {
+      homeDir,
+      allowedRoots,
+      defaultRoot,
+      cwd: defaultRoot,
+      mustExist: true,
+      expect: "directory",
+    });
+    const shellOptions = {
       homeDir,
       allowedRoots,
       defaultRoot,
       maxStdoutBytes: limits.maxStdoutBytes,
       maxStderrBytes: limits.maxStderrBytes,
       shellTimeoutMs: limits.shellTimeoutMs,
-    }, hooks);
+    };
+    switch (command) {
+      case "pwd":
+        return executePwd(cwdResolved.path, hooks);
+      case "ls":
+        return executeLs(toolInput, cwdResolved.path, shellOptions, hooks);
+      case "cat":
+        return executeCat(toolInput, cwdResolved.path, shellOptions, hooks);
+      case "rg":
+        return executeRg(toolInput, cwdResolved.path, shellOptions, hooks);
+      default:
+        throw codeError(`Command is not allowed: ${toolInput.command}`, "COMMAND_NOT_ALLOWED");
+    }
   }
 
   return {

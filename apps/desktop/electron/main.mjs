@@ -1858,132 +1858,138 @@ const runtimeManager = createRuntimeManager({
       .map((entry) => String(entry?.path ?? "").trim())
       .filter(Boolean),
 });
+const desktopBridgeBrowserTools = [
+  {
+    name: "local-browser.open",
+    description: "Open a URL in the embedded OpenWork browser on the employee machine.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to open." },
+        background: { type: "boolean", description: "Keep the tab in the background." },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+    execute: async (toolInput) => desktopBridgeBrowserOpen(toolInput),
+  },
+  {
+    name: "local-browser.navigate",
+    description: "Navigate an existing browser tab or create one if needed on the employee machine.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to navigate to." },
+        tabId: { type: "string", description: "Optional existing tab id." },
+        background: { type: "boolean", description: "Keep the tab in the background." },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+    execute: async (toolInput) => desktopBridgeBrowserNavigate(toolInput),
+  },
+  {
+    name: "local-browser.state",
+    description: "Read the current embedded browser state on the employee machine.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    execute: async () => desktopBridgeBrowserState(),
+  },
+  {
+    name: "local-browser.close",
+    description: "Close a browser tab on the employee machine.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Optional browser tab id. Defaults to the active tab." },
+      },
+      additionalProperties: false,
+    },
+    execute: async (toolInput) => desktopBridgeBrowserClose(toolInput),
+  },
+];
+const desktopBridgeComputerUseTools =
+  process.platform === "darwin"
+    ? [
+        {
+          name: "local-computer-use.permissions",
+          description: "Check local computer-use permissions on the employee machine.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          execute: async () => checkComputerUsePermissions(),
+        },
+        {
+          name: "local-computer-use.snapshot",
+          description: "Capture a semantic snapshot of an app window on the employee machine.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              appName: { type: "string", description: "Optional app name." },
+              strict: { type: "boolean", description: "Prefer background-safe mode when true." },
+            },
+            additionalProperties: false,
+          },
+          execute: async (toolInput) => desktopBridgeComputerUseTool("snapshot", toolInput),
+        },
+        {
+          name: "local-computer-use.click",
+          description: "Click an element or screen point on the employee machine.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              appName: { type: "string" },
+              ref: { type: "string" },
+              index: { type: "integer" },
+              imageX: { type: "number" },
+              imageY: { type: "number" },
+              clickCount: { type: "integer" },
+              strict: { type: "boolean" },
+            },
+            additionalProperties: false,
+          },
+          execute: async (toolInput) => desktopBridgeComputerUseTool("click", toolInput),
+        },
+        {
+          name: "local-computer-use.type_text",
+          description: "Type text into the currently focused app on the employee machine.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              text: { type: "string", description: "Exact text to type." },
+              strict: { type: "boolean" },
+            },
+            required: ["text"],
+            additionalProperties: false,
+          },
+          execute: async (toolInput) => desktopBridgeComputerUseTool("type_text", toolInput),
+        },
+        {
+          name: "local-computer-use.press_key",
+          description: "Press a key or key combination on the employee machine.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              combo: { type: "string", description: "Key combo such as command+k." },
+              strict: { type: "boolean" },
+            },
+            required: ["combo"],
+            additionalProperties: false,
+          },
+          execute: async (toolInput) => desktopBridgeComputerUseTool("press_key", toolInput),
+        },
+      ]
+    : [];
 const desktopBridgeClient = createDesktopBridgeClient({
   userDataDir: app.getPath("userData"),
   appVersion: app.getVersion(),
   appName: APP_NAME,
-  extraTools: [
-    {
-      name: "local-browser.open",
-      description: "Open a URL in the embedded OpenWork browser on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          url: { type: "string", description: "URL to open." },
-          background: { type: "boolean", description: "Keep the tab in the background." },
-        },
-        required: ["url"],
-        additionalProperties: false,
-      },
-      execute: async (toolInput) => desktopBridgeBrowserOpen(toolInput),
-    },
-    {
-      name: "local-browser.navigate",
-      description: "Navigate an existing browser tab or create one if needed on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          url: { type: "string", description: "URL to navigate to." },
-          tabId: { type: "string", description: "Optional existing tab id." },
-          background: { type: "boolean", description: "Keep the tab in the background." },
-        },
-        required: ["url"],
-        additionalProperties: false,
-      },
-      execute: async (toolInput) => desktopBridgeBrowserNavigate(toolInput),
-    },
-    {
-      name: "local-browser.state",
-      description: "Read the current embedded browser state on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {},
-        additionalProperties: false,
-      },
-      execute: async () => desktopBridgeBrowserState(),
-    },
-    {
-      name: "local-browser.close",
-      description: "Close a browser tab on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tabId: { type: "string", description: "Optional browser tab id. Defaults to the active tab." },
-        },
-        additionalProperties: false,
-      },
-      execute: async (toolInput) => desktopBridgeBrowserClose(toolInput),
-    },
-    {
-      name: "local-computer-use.permissions",
-      description: "Check local computer-use permissions on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {},
-        additionalProperties: false,
-      },
-      execute: async () => checkComputerUsePermissions(),
-    },
-    {
-      name: "local-computer-use.snapshot",
-      description: "Capture a semantic snapshot of an app window on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          appName: { type: "string", description: "Optional app name." },
-          strict: { type: "boolean", description: "Prefer background-safe mode when true." },
-        },
-        additionalProperties: false,
-      },
-      execute: async (toolInput) => desktopBridgeComputerUseTool("snapshot", toolInput),
-    },
-    {
-      name: "local-computer-use.click",
-      description: "Click an element or screen point on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          appName: { type: "string" },
-          ref: { type: "string" },
-          index: { type: "integer" },
-          imageX: { type: "number" },
-          imageY: { type: "number" },
-          clickCount: { type: "integer" },
-          strict: { type: "boolean" },
-        },
-        additionalProperties: false,
-      },
-      execute: async (toolInput) => desktopBridgeComputerUseTool("click", toolInput),
-    },
-    {
-      name: "local-computer-use.type_text",
-      description: "Type text into the currently focused app on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "Exact text to type." },
-          strict: { type: "boolean" },
-        },
-        required: ["text"],
-        additionalProperties: false,
-      },
-      execute: async (toolInput) => desktopBridgeComputerUseTool("type_text", toolInput),
-    },
-    {
-      name: "local-computer-use.press_key",
-      description: "Press a key or key combination on the employee machine.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          combo: { type: "string", description: "Key combo such as command+k." },
-          strict: { type: "boolean" },
-        },
-        required: ["combo"],
-        additionalProperties: false,
-      },
-      execute: async (toolInput) => desktopBridgeComputerUseTool("press_key", toolInput),
-    },
-  ],
+  extraTools: [...desktopBridgeBrowserTools, ...desktopBridgeComputerUseTools],
   requestApproval: async (payload) => {
     const { title, detail } = desktopApprovalDetail(payload);
     const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow() ?? mainWindow ?? undefined, {

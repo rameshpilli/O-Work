@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
 
 import { createDesktopLocalToolAdapter } from "./desktop-local-tools.mjs";
 
@@ -75,12 +74,7 @@ describe("desktop local tools", () => {
     assert.match(result.stdout, /hello\.txt/);
   });
 
-  it("runs a restricted rg command locally when rg is available", async (t) => {
-    const rgCheck = spawnSync("rg", ["--version"], { stdio: "ignore" });
-    if (rgCheck.status !== 0) {
-      t.skip("rg is not installed in this environment");
-      return;
-    }
+  it("runs a restricted rg command locally", async () => {
     const result = await adapter.executeToolCall("local-shell.exec", {
       command: "rg",
       pattern: "TODO",

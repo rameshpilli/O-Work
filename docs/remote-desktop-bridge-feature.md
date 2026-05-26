@@ -205,14 +205,27 @@ Primary implementation:
 
 - [apps/server/src/desktop-bridge.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/desktop-bridge.ts)
 - [apps/server/src/server.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/server.ts)
-
-Primary implementation:
-
 - [apps/server/src/desktop-bridge.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/desktop-bridge.ts)
 - [apps/server/src/server.ts](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/server/src/server.ts)
 - [apps/desktop/electron/desktop-bridge-client.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/desktop-bridge-client.mjs)
 - [apps/desktop/electron/desktop-local-tools.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/desktop-local-tools.mjs)
 - [apps/desktop/electron/main.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/main.mjs)
+
+### 10. Windows-readiness pass
+
+The bridge now includes a first Windows-readiness pass:
+
+- `local-shell.exec` no longer depends on spawning Unix-only binaries for `pwd`, `ls`, `cat`, and `rg`
+- browser bridge remains available cross-platform
+- computer-use tools are advertised only on macOS until a Windows backend exists
+- GitHub Actions can build downloadable installer artifacts for both macOS and Windows
+
+Primary implementation:
+
+- [apps/desktop/electron/desktop-local-tools.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/desktop-local-tools.mjs)
+- [apps/desktop/electron/main.mjs](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/apps/desktop/electron/main.mjs)
+- [.github/workflows/desktop-installers.yml](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/.github/workflows/desktop-installers.yml)
+- [docs/windows-desktop-plan.md](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/docs/windows-desktop-plan.md)
 
 ## End-to-End Proof
 
@@ -455,19 +468,21 @@ The architecture itself can support Windows because the major building blocks ar
 - Node-based local file access
 - remote worker-side MCP proxy
 
-However, the current POC is not yet a turn-key Windows implementation.
+This branch now moves the POC closer to that goal, but it is still not a full Windows desktop-automation implementation.
 
 Reasons:
 
-- `local-shell.exec` currently assumes Unix-style commands such as `pwd`, `ls`, and `cat`
-- the default tested paths and prompts were written around macOS paths such as `/Users/<username>/Downloads`
-- Windows-specific shell behavior and path conventions have not been validated yet
+- the shell bridge has been rewritten to implement `pwd`, `ls`, `cat`, and `rg` in Node so it no longer depends on Unix binaries
+- the browser bridge should remain portable because it is backed by Electron
+- computer-use is still macOS-specific today
+- Windows-specific path prompts and a real Windows smoke test are still pending
 
 ### Practical interpretation
 
-- `local-fs.list` and `local-fs.read` are likely portable with Windows-specific root configuration
-- `local-shell.exec` needs a Windows command strategy before calling this Windows-ready
-- browser/computer-use support would need separate Windows validation later
+- `local-fs.*` is portable with Windows-specific root configuration
+- `local-shell.exec` is now structured to be portable for the current restricted command set
+- browser support should work on Windows once the app is packaged there
+- computer-use still needs a Windows backend and validation
 
 So the right statement is:
 
@@ -520,6 +535,7 @@ That means the idea is correct, the implementation path is real, and the next wo
 - Allowed roots and allowed shell commands are enforced from server policy
 - Bridge events and approval lifecycle are persisted to append-only JSONL on the worker
 - Workspace APIs expose bridge status and recent events
+- GitHub Actions can build `.dmg` and `.exe` installer artifacts for pilot distribution
 
 ### Required before a pilot rollout
 
