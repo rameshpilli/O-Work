@@ -22,8 +22,10 @@ jobs:
         include:
           - os: macos-latest
             artifact: macos-installer
+            node_version_file: .nvmrc
           - os: windows-latest
             artifact: windows-installer
+            node_version: 22
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -35,10 +37,17 @@ jobs:
         with:
           version: 10.27.0
 
-      - name: Setup Node
+      - name: Setup Node (macOS)
         uses: actions/setup-node@v6
+        if: runner.os == 'macOS'
         with:
-          node-version-file: .nvmrc
+          node-version-file: ${{ matrix.node_version_file }}
+
+      - name: Setup Node (Windows)
+        uses: actions/setup-node@v6
+        if: runner.os == 'Windows'
+        with:
+          node-version: ${{ matrix.node_version }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

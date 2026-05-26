@@ -95,6 +95,10 @@ Current outputs:
 - Windows installer artifacts from `windows-latest`
 - Windows UI smoke screenshots and a text/JSON shell snapshot from `windows-latest`
 
+Current workflow note:
+
+- the Windows installer workflow pins Node 22 on `windows-latest` because the current `better-sqlite3` dependency path is more reliable there than on Node 24 for GitHub-hosted runners
+
 The workflow uploads everything from `apps/desktop/dist-electron/**`, which includes the generated installer payloads.
 
 ## Current Windows support status
