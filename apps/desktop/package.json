@@ -20,6 +20,7 @@
     "package:electron:dir": "pnpm run build:electron && pnpm exec electron-builder --config electron-builder.yml --dir",
     "electron": "pnpm exec electron ./electron/main.mjs",
     "check:electron": "node ./scripts/check-electron-bridge.mjs",
+    "smoke:screenshot": "node ./scripts/electron-screenshot-smoke.mjs",
     "test:electron": "node --test ./electron/*.test.mjs",
     "typecheck:electron": "pnpm --dir ../server exec tsc -p ../desktop/tsconfig.electron.json --noEmit",
     "prepare:sidecar": "node ./scripts/prepare-sidecar.mjs"
@@ -37,7 +38,8 @@
   "devDependencies": {
     "electron": "^35.0.0",
     "electron-builder": "^25.1.8",
-    "electron-devtools-installer": "^4.0.0"
+    "electron-devtools-installer": "^4.0.0",
+    "playwright": "1.58.2"
   },
   "packageManager": "pnpm@10.27.0",
   "opencodeRouterVersion": "0.13.12"

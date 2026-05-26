@@ -118,6 +118,25 @@ Expected behavior:
 - permission check should report the current Accessibility and Screen Recording state
 - snapshot/control features may still fail until macOS permissions are granted
 
+## Platform notes
+
+### macOS
+
+- validated end to end for the current pilot
+- browser bridge works
+- computer-use requires Accessibility and Screen Recording permissions
+
+### Windows
+
+- the desktop bridge shell/file/browser path is the current target
+- a Windows installer artifact can be produced from GitHub Actions
+- computer-use is not a supported Windows feature yet in this pilot
+- Windows still needs a real smoke test after installing the `.exe`
+
+See:
+
+- [docs/windows-desktop-plan.md](/Users/rameshpilli/Developer/open%20work%20and%20developer/openwork/docs/windows-desktop-plan.md)
+
 ## Known pilot limitations
 
 - static token reuse
@@ -126,7 +145,7 @@ Expected behavior:
 - no database-backed audit store
 - no admin UI
 - one-desktop-per-workspace assumption for the current bridge routing model
-- Windows is not validated yet
+- Windows is not fully validated yet
 
 ## macOS permissions
 
@@ -168,3 +187,31 @@ For production, you still need:
 - device management
 - stronger multi-user routing semantics
 - Windows support if required by your endpoint fleet
+
+## Installer artifacts
+
+For branch-based pilot distribution, use the GitHub Actions workflow:
+
+- `Desktop Installers`
+
+It uploads:
+
+- a macOS installer artifact
+- a Windows installer artifact
+- Windows UI smoke screenshots and a shell snapshot report
+
+The user can install the desktop app first and add the remote worker URL and token later through the UI.
+
+## Windows CI verification
+
+There are now two Windows-oriented CI paths:
+
+1. `Desktop Installers`
+   - builds the Windows installer
+   - captures first-run UI smoke screenshots
+
+2. `Windows Remote UI Smoke`
+   - manual workflow
+   - requires a real worker URL/token in GitHub secrets
+   - drives the actual `Connect custom remote` flow in the Electron UI
+   - can send a prompt and capture result screenshots
