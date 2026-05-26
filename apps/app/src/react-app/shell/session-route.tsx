@@ -86,6 +86,7 @@ import { useRestrictionNotice } from "../domains/cloud/restriction-notice-provid
 import { ReactSessionRuntime } from "../domains/session/sync/runtime-sync";
 import { useSessionActivityStore } from "../domains/session/status/session-activity-store";
 import { buildOpenworkEnvSystemContext } from "../domains/session/sync/env-context";
+import { buildDesktopBridgeSystemContext } from "../domains/session/sync/env-context";
 import {
   permissionKey as reactPermissionKey,
   questionKey as reactQuestionKey,
@@ -1391,14 +1392,18 @@ export function SessionRoute() {
       reconnectAttemptedWorkspaceIdRef.current = "";
       return;
     }
-    if (!selectedWorkspace || selectedWorkspace.workspaceType !== "local") return;
-    const workspaceId = selectedWorkspace.id?.trim() ?? "";
+    const bootstrapWorkspace =
+      selectedWorkspace?.workspaceType === "local"
+        ? selectedWorkspace
+        : workspaces.find((workspace) => workspace.workspaceType === "local") ?? null;
+    if (!bootstrapWorkspace) return;
+    const workspaceId = bootstrapWorkspace.id?.trim() ?? "";
     if (!workspaceId || reconnectAttemptedWorkspaceIdRef.current === workspaceId) return;
     reconnectAttemptedWorkspaceIdRef.current = workspaceId;
 
     void ensureDesktopLocalOpenworkConnection({
       route: "session",
-      workspace: selectedWorkspace,
+      workspace: bootstrapWorkspace,
       allWorkspaces: workspaces,
     }).catch((error) => {
       const message = error instanceof Error ? error.message : describeRouteError(error);
@@ -2015,13 +2020,21 @@ export function SessionRoute() {
           cacheKey: selectedSessionId,
           runtimeKey: envRuntimeKey,
         });
+        const desktopBridgeSystemContext = await buildDesktopBridgeSystemContext(
+          selectedWorkspaceEndpoint?.client ?? null,
+          selectedWorkspaceEndpoint?.workspaceId ?? null,
+          { cacheKey: selectedSessionId },
+        );
+        const systemContext = [envSystemContext, desktopBridgeSystemContext]
+          .filter((value): value is string => Boolean(value && value.trim()))
+          .join("\n\n");
         const result = await opencodeClient.session.promptAsync({
           sessionID: selectedSessionId,
           parts,
           model: local.prefs.defaultModel ?? undefined,
           agent: selectedAgent ?? undefined,
           ...(modelVariantValue ? { variant: modelVariantValue } : {}),
-          ...(envSystemContext ? { system: envSystemContext } : {}),
+          ...(systemContext ? { system: systemContext } : {}),
         });
         if (result.error) {
           throw new Error(serializeSDKError(result.error));

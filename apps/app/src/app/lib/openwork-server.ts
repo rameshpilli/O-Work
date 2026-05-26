@@ -107,6 +107,24 @@ export type OpenworkWorkspaceList = {
   activeId?: string | null;
 };
 
+export type OpenworkDesktopBridgeStatus = {
+  ok: boolean;
+  workspaceId: string;
+  connected: boolean;
+  device: {
+    id: string;
+    name: string;
+    workspaceId?: string;
+    metadata?: Record<string, unknown>;
+    allowedRoots?: string[];
+    tools?: Array<{
+      name?: string;
+      description?: string;
+      inputSchema?: Record<string, unknown>;
+    }>;
+  } | null;
+};
+
 export type OpenworkSessionMessage = {
   info: Message;
   parts: Part[];
@@ -695,8 +713,15 @@ function isStreamUrl(url: string): boolean {
 
 const resolveFetch = (url?: string) => {
   if (!isDesktopRuntime()) return globalThis.fetch;
+  // Prefer the browser fetch path for OpenWork HTTP calls inside Electron.
+  // Remote workers already advertise CORS, and the desktop bridge fetch path
+  // can lag behind route/session state for workspace-scoped requests, which
+  // leaves the sidebar empty even when the worker returns valid sessions.
+  if (typeof window !== "undefined" && typeof window.fetch === "function") {
+    return window.fetch.bind(window);
+  }
   if (url && isStreamUrl(url)) {
-    return typeof window !== "undefined" ? window.fetch.bind(window) : globalThis.fetch;
+    return globalThis.fetch;
   }
   return desktopFetch;
 };
@@ -941,6 +966,12 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
         { token, hostToken, timeoutMs: timeouts.sessionRead },
       );
     },
+    getDesktopBridgeStatus: (workspaceId: string) =>
+      requestJson<OpenworkDesktopBridgeStatus>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/desktop-bridge/status`,
+        { token, hostToken, timeoutMs: timeouts.status },
+      ),
     exportWorkspace: (
       workspaceId: string,
       options?: { sensitiveMode?: OpenworkWorkspaceExportSensitiveMode },

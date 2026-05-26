@@ -51,8 +51,10 @@ import {
   stripSensitiveWorkspaceExportData,
   type WorkspaceExportSensitiveMode,
 } from "./workspace-export-safety.js";
+import { createDesktopBridgeUpgradeHandler, DesktopBridgeService } from "./desktop-bridge.js";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { serve, type ServeResult } from "./serve-node.js";
 import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
@@ -69,6 +71,18 @@ const FILE_SESSION_CATALOG_DEFAULT_LIMIT = 2000;
 const FILE_SESSION_CATALOG_MAX_LIMIT = 10000;
 const OPENWORK_VOICE_REALTIME_MODEL = "gpt-realtime-2";
 const OPENWORK_VOICE_TRANSCRIPTION_MODEL = "gpt-4o-transcribe";
+const DESKTOP_BRIDGE_MCP_NAME = "openwork-desktop-bridge";
+const DESKTOP_BRIDGE_PROXY_SCRIPT_SOURCE_PATH = fileURLToPath(
+  new URL("../../../packages/openwork-ui-mcp/desktop-bridge-mcp.mjs", import.meta.url),
+);
+const DESKTOP_BRIDGE_PROXY_SCRIPT_BUNDLED_PATH = "/usr/local/lib/openwork/desktop-bridge-mcp.mjs";
+
+function resolveDesktopBridgeProxyScriptPath() {
+  const configured = process.env.OPENWORK_DESKTOP_BRIDGE_PROXY_SCRIPT?.trim();
+  if (configured) return configured;
+  if (existsSync(DESKTOP_BRIDGE_PROXY_SCRIPT_SOURCE_PATH)) return DESKTOP_BRIDGE_PROXY_SCRIPT_SOURCE_PATH;
+  return DESKTOP_BRIDGE_PROXY_SCRIPT_BUNDLED_PATH;
+}
 
 const OPENWORK_VOICE_REALTIME_TOOLS = [
   {
@@ -101,6 +115,23 @@ const OPENWORK_VOICE_REALTIME_TOOLS = [
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function ensureWorkspaceDesktopBridgeMcp(config: ServerConfig, workspace: WorkspaceInfo): Promise<void> {
+  const workspaceRoot = workspace.path?.trim();
+  if (!workspaceRoot) return;
+  const bridgeBaseUrl = `http://127.0.0.1:${config.port}`;
+  const proxyScriptPath = resolveDesktopBridgeProxyScriptPath();
+  await addMcp(workspaceRoot, DESKTOP_BRIDGE_MCP_NAME, {
+    type: "local",
+    enabled: true,
+    command: ["node", proxyScriptPath],
+    environment: {
+      OPENWORK_DESKTOP_BRIDGE_SERVER_URL: bridgeBaseUrl,
+      OPENWORK_DESKTOP_BRIDGE_WORKSPACE_ID: workspace.id,
+      OPENWORK_DESKTOP_BRIDGE_HOST_TOKEN: config.hostToken,
+    },
+  });
 }
 
 function readStringField(value: unknown, key: string): string {
@@ -404,25 +435,36 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const approvals = new ApprovalService(config.approval);
   const reloadEvents = new ReloadEventStore();
   const tokens = new TokenService(config);
+  const desktopBridge = new DesktopBridgeService();
   const env = new EnvService();
   const logger = createServerLogger(config);
   let watcherHandle = startReloadWatchers({ config, reloadEvents, logger });
   const refreshWorkspaceReloadBaseline = (workspaceId: string, reasons?: ReloadReason[]) =>
     watcherHandle.refreshWorkspace(workspaceId, reasons);
   reloadBaselineRefreshers.set(config, refreshWorkspaceReloadBaseline);
+  await Promise.all(config.workspaces.map((workspace) =>
+    ensureWorkspaceDesktopBridgeMcp(config, workspace).catch((error) => {
+      console.warn("[desktop-bridge] failed to ensure MCP config", {
+        workspaceId: workspace.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    })
+  ));
   const restartReloadWatchers = () => {
     watcherHandle.close();
     watcherHandle = startReloadWatchers({ config, reloadEvents, logger });
   };
-  const routes = createRoutes(config, approvals, tokens, env, restartReloadWatchers);
+  const routes = createRoutes(config, approvals, tokens, env, restartReloadWatchers, desktopBridge);
 
   const serverOptions: {
     hostname: string;
     port: number;
     fetch: (request: Request) => Response | Promise<Response>;
+    onUpgrade: NonNullable<Parameters<typeof serve>[0]["onUpgrade"]>;
   } = {
     hostname: config.host,
     port: config.port,
+    onUpgrade: createDesktopBridgeUpgradeHandler(desktopBridge, { tokens }),
     fetch: async (request: Request) => {
       const url = new URL(request.url);
       const startedAt = Date.now();
@@ -1386,6 +1428,7 @@ function createRoutes(
   tokens: TokenService,
   env: EnvService,
   onWorkspacesChanged: () => void,
+  desktopBridge: DesktopBridgeService,
 ): Route[] {
   const routes: Route[] = [];
   const fileSessions = new FileSessionStore();
@@ -1639,6 +1682,119 @@ function createRoutes(
       throw new ApiError(404, "token_not_found", "Token not found");
     }
     return jsonResponse({ ok: true });
+  });
+
+  addRoute(routes, "GET", "/desktop/enrollment-tokens", "host", async () => {
+    return jsonResponse({ items: desktopBridge.listEnrollmentTokens() });
+  });
+
+  addRoute(routes, "POST", "/desktop/enrollment-tokens", "host", async (ctx) => {
+    ensureWritable(config);
+    const body = await readJsonBody(ctx.request);
+    const issued = desktopBridge.issueEnrollmentToken({
+      label: typeof body.label === "string" ? body.label.trim() : undefined,
+      ttlMs: typeof body.ttlMs === "number" ? body.ttlMs : undefined,
+    });
+    return jsonResponse(issued, 201);
+  });
+
+  addRoute(routes, "POST", "/desktop/enroll", "none", async (ctx) => {
+    const body = await readJsonBody(ctx.request);
+    const enrolled = desktopBridge.enrollDevice({
+      enrollmentToken: typeof body.enrollmentToken === "string" ? body.enrollmentToken : "",
+      deviceName: typeof body.deviceName === "string" ? body.deviceName : "",
+      platform: typeof body.platform === "string" ? body.platform : undefined,
+      arch: typeof body.arch === "string" ? body.arch : undefined,
+      clientVersion: typeof body.clientVersion === "string" ? body.clientVersion : undefined,
+      metadata: body.metadata,
+    });
+    return jsonResponse({
+      ok: true,
+      device: enrolled.device,
+      deviceToken: enrolled.deviceToken,
+      websocket: {
+        path: "/desktop/bridge",
+        url: desktopBridge.buildWebSocketUrl(ctx.url, enrolled.device.id, enrolled.deviceToken),
+      },
+    }, 201);
+  });
+
+  addRoute(routes, "GET", "/desktop/devices", "host", async () => {
+    return jsonResponse({ items: desktopBridge.listDevices() });
+  });
+
+  addRoute(routes, "GET", "/desktop/devices/:id", "host", async (ctx) => {
+    return jsonResponse({ item: desktopBridge.getDevice(ctx.params.id) });
+  });
+
+  addRoute(routes, "GET", "/desktop/devices/:id/tool-calls", "host", async (ctx) => {
+    return jsonResponse({ items: desktopBridge.listToolCalls(ctx.params.id) });
+  });
+
+  addRoute(routes, "POST", "/desktop/devices/:id/tool-calls", "host", async (ctx) => {
+    const body = await readJsonBody(ctx.request);
+    const item = desktopBridge.createToolCall({
+      deviceId: ctx.params.id,
+      toolName: typeof body.toolName === "string" ? body.toolName : "",
+      arguments: body.arguments,
+      timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
+      requestedBy: ctx.actor ?? null,
+    });
+    return jsonResponse({ item }, 202);
+  });
+
+  addRoute(routes, "GET", "/desktop/tool-calls/:id", "host", async (ctx) => {
+    return jsonResponse({ item: desktopBridge.getToolCall(ctx.params.id) });
+  });
+
+  addRoute(routes, "POST", "/desktop/tool-calls/:id/result", "none", async (ctx) => {
+    const auth = desktopBridge.authenticateDeviceRequest(ctx.request);
+    const body = await readJsonBody(ctx.request);
+    const item = desktopBridge.completeToolCallFromDevice(auth.device.id, ctx.params.id, {
+      ok: typeof body.ok === "boolean" ? body.ok : true,
+      output: body.output,
+      error: body.error,
+    });
+    return jsonResponse({ ok: true, item });
+  });
+
+  addRoute(routes, "POST", "/desktop/tool-calls/:id/chunks", "none", async (ctx) => {
+    const auth = desktopBridge.authenticateDeviceRequest(ctx.request);
+    const body = await readJsonBody(ctx.request);
+    const item = desktopBridge.appendToolChunkFromDevice(auth.device.id, ctx.params.id, {
+      stream: typeof body.stream === "string" ? body.stream : "",
+      chunk: body.chunk,
+    });
+    return jsonResponse({ ok: true, item });
+  });
+
+  addRoute(routes, "GET", "/workspace/:id/desktop-bridge/status", "client", async (ctx) => {
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    const device = desktopBridge.getActiveWorkspaceDevice(workspace.id);
+    return jsonResponse({
+      ok: true,
+      workspaceId: workspace.id,
+      connected: Boolean(device),
+      device,
+    });
+  });
+
+  addRoute(routes, "POST", "/workspace/:id/desktop-bridge/tool-call", "host-token", async (ctx) => {
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    const body = await readJsonBody(ctx.request);
+    const result = await desktopBridge.callWorkspaceTool({
+      workspaceId: workspace.id,
+      toolName: typeof body.toolName === "string" ? body.toolName : "",
+      arguments: body.arguments,
+      timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
+      requestedBy: ctx.actor ?? null,
+    });
+    return jsonResponse({
+      ok: result.item.status === "completed",
+      workspaceId: workspace.id,
+      device: result.device,
+      item: result.item,
+    });
   });
 
   function rethrowEnvStoreReadError(error: unknown): never {

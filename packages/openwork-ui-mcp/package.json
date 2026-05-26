@@ -9,9 +9,12 @@
     "openwork-ui-mcp": "index.mjs"
   },
   "files": [
-    "index.mjs"
+    "index.mjs",
+    "desktop-bridge-mcp.mjs",
+    "dist"
   ],
   "scripts": {
+    "build:desktop-bridge-proxy": "bun build desktop-bridge-mcp.mjs --target node --outfile dist/desktop-bridge-mcp.mjs",
     "check": "node --check index.mjs",
     "test": "node --check index.mjs"
   },

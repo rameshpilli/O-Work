@@ -20,6 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { app, BrowserWindow, Menu, WebContentsView, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from "electron";
+import { createDesktopBridgeClient } from "./desktop-bridge-client.mjs";
 import { registerMigrationIpc } from "./migration.mjs";
 import { createRuntimeManager } from "./runtime.mjs";
 import { registerUpdaterIpc } from "./updater.mjs";
@@ -1703,6 +1704,48 @@ async function writeWorkspaceState(nextState) {
   return output;
 }
 
+async function syncDesktopBridgeFromSelectedRemoteWorkspace() {
+  const state = await readWorkspaceState();
+  const selectedId = state.selectedId || state.activeId || state.workspaces[0]?.id || "";
+  const workspace = selectedId
+    ? state.workspaces.find((entry) => entry?.id === selectedId)
+    : state.workspaces[0];
+  if (!workspace || workspace.workspaceType !== "remote" || workspace.remoteType !== "openwork") {
+    return null;
+  }
+  const serverUrl = String(workspace.openworkHostUrl ?? workspace.baseUrl ?? "").trim().replace(/\/+$/, "");
+  const workspaceId = String(workspace.openworkWorkspaceId ?? "").trim();
+  const enrollmentToken = String(workspace.openworkToken ?? "").trim();
+  if (!serverUrl || !workspaceId || !enrollmentToken) {
+    return null;
+  }
+  const current = await desktopBridgeClient.getEnrollment();
+  const websocketUrl = `${serverUrl.replace(/^http/i, "ws")}/workspace/${encodeURIComponent(workspaceId)}/desktop-bridge/connect`;
+  const desired = {
+    ...current,
+    enabled: true,
+    serverUrl,
+    websocketUrl,
+    enrollmentToken,
+  };
+  const same =
+    current?.enabled === desired.enabled
+    && String(current?.serverUrl ?? "") === desired.serverUrl
+    && String(current?.websocketUrl ?? "") === desired.websocketUrl
+    && String(current?.enrollmentToken ?? "") === desired.enrollmentToken;
+  if (same) return current;
+  return desktopBridgeClient.setEnrollment(desired);
+}
+
+function startDesktopBridgeAutoSync() {
+  if (desktopBridgeSyncTimer) clearInterval(desktopBridgeSyncTimer);
+  desktopBridgeSyncTimer = setInterval(() => {
+    void syncDesktopBridgeFromSelectedRemoteWorkspace().catch((error) => {
+      console.warn("[desktop-bridge] remote sync failed", error);
+    });
+  }, 10_000);
+}
+
 const runtimeManager = createRuntimeManager({
   app,
   desktopRoot: path.resolve(__dirname, ".."),
@@ -1713,6 +1756,12 @@ const runtimeManager = createRuntimeManager({
       .map((entry) => String(entry?.path ?? "").trim())
       .filter(Boolean),
 });
+const desktopBridgeClient = createDesktopBridgeClient({
+  userDataDir: app.getPath("userData"),
+  appVersion: app.getVersion(),
+  appName: APP_NAME,
+});
+let desktopBridgeSyncTimer = null;
 
 let runtimeDisposedForQuit = false;
 let runtimeBootstrapPromise = null;
@@ -2475,6 +2524,16 @@ async function handleDesktopInvoke(event, command, ...args) {
       return debugDesktopBootstrapConfig();
     case "setDesktopBootstrapConfig":
       return setDesktopBootstrapConfig(args[0] ?? {});
+    case "getDesktopBridgeEnrollment":
+      return desktopBridgeClient.getEnrollment();
+    case "setDesktopBridgeEnrollment":
+      return desktopBridgeClient.setEnrollment(args[0] ?? {});
+    case "getDesktopBridgeStatus":
+      return desktopBridgeClient.status();
+    case "restartDesktopBridge":
+      return desktopBridgeClient.restart();
+    case "stopDesktopBridge":
+      return desktopBridgeClient.stop();
     case "nukeOpenworkAndOpencodeConfigAndExit": {
       await rm(app.getPath("userData"), { recursive: true, force: true });
       app.exit(0);
@@ -2976,7 +3035,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", (event) => {
     if (runtimeDisposedForQuit) return;
     event.preventDefault();
-    void Promise.all([disposeRuntimeBeforeQuit(), stopUiControlServer()]).finally(() => app.quit());
+    if (desktopBridgeSyncTimer) clearInterval(desktopBridgeSyncTimer);
+    void Promise.all([disposeRuntimeBeforeQuit(), stopUiControlServer(), desktopBridgeClient.dispose()]).finally(() => app.quit());
   });
 
   app.on("second-instance", async (_event, argv) => {
@@ -3006,6 +3066,13 @@ if (!app.requestSingleInstanceLock()) {
     await startUiControlServer().catch((error) => {
       console.warn("[ui-control] failed to start", error);
     });
+    await syncDesktopBridgeFromSelectedRemoteWorkspace().catch((error) => {
+      console.warn("[desktop-bridge] initial remote sync failed", error);
+    });
+    await desktopBridgeClient.start().catch((error) => {
+      console.warn("[desktop-bridge] failed to start", error);
+    });
+    startDesktopBridgeAutoSync();
     runtimeBootstrapPromise = bootRuntimeForSelectedWorkspace().catch((error) => ({
       ok: false,
       error: error instanceof Error ? error.message : String(error),

@@ -10,9 +10,10 @@ RUN apt-get update \
 
 COPY . .
 
-RUN pnpm install --frozen-lockfile --filter openwork-orchestrator... --filter openwork-server... \
+RUN pnpm install --frozen-lockfile --filter openwork-orchestrator... --filter openwork-server... --filter openwork-ui-mcp... \
   && pnpm --filter openwork-orchestrator build:bin \
-  && pnpm --filter openwork-server build:bin
+  && pnpm --filter openwork-server build:bin \
+  && pnpm --dir packages/openwork-ui-mcp build:desktop-bridge-proxy
 
 FROM node:22-bookworm-slim
 
@@ -27,6 +28,7 @@ RUN apt-get update \
 
 COPY --from=openwork-builder /src/apps/orchestrator/dist/bin/openwork /usr/local/bin/openwork
 COPY --from=openwork-builder /src/apps/server/dist/bin/openwork-server /usr/local/bin/openwork-server
+COPY --from=openwork-builder /src/packages/openwork-ui-mcp/dist/desktop-bridge-mcp.mjs /usr/local/lib/openwork/desktop-bridge-mcp.mjs
 COPY --from=openwork-builder /src/constants.json /usr/local/constants.json
 COPY packaging/docker/microsandbox-entrypoint.sh /usr/local/bin/microsandbox-entrypoint.sh
 
@@ -60,6 +62,7 @@ RUN test "$(openwork --version)" = "$OPENWORK_ORCHESTRATOR_VERSION" \
 ENV OPENWORK_DATA_DIR=/data/openwork-orchestrator
 ENV OPENWORK_SIDECAR_DIR=/data/sidecars
 ENV OPENWORK_WORKSPACE=/workspace
+ENV OPENWORK_DESKTOP_BRIDGE_PROXY_SCRIPT=/usr/local/lib/openwork/desktop-bridge-mcp.mjs
 
 EXPOSE 8787
 

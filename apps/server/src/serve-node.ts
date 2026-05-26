@@ -5,19 +5,22 @@
  * but backed by `node:http`. This allows the server to run in any Node.js
  * environment (including Electron's main process) without Bun.
  */
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
+import type { Duplex } from "node:stream";
 
 export type ServeOptions = {
   hostname: string;
   port: number;
   fetch: (request: Request) => Response | Promise<Response>;
   idleTimeout?: number;
+  onUpgrade?: (request: IncomingMessage, socket: Duplex, head: Buffer) => boolean | Promise<boolean>;
 };
 
 export type ServeResult = {
   port: number;
   stop: () => void;
+  nodeServer?: Server;
 };
 
 function isResponseWritable(nodeRes: ServerResponse): boolean {
@@ -173,6 +176,21 @@ export function serve(options: ServeOptions): Promise<ServeResult> {
     server.keepAliveTimeout = options.idleTimeout * 1000;
   }
 
+  if (options.onUpgrade) {
+    server.on("upgrade", async (request, socket, head) => {
+      try {
+        const handled = await options.onUpgrade?.(request, socket, head);
+        if (!handled && !socket.destroyed) {
+          socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        }
+      } catch {
+        if (!socket.destroyed) {
+          socket.end("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+        }
+      }
+    });
+  }
+
   let boundPort = port;
 
   return new Promise<ServeResult>((resolve, reject) => {
@@ -184,6 +202,7 @@ export function serve(options: ServeOptions): Promise<ServeResult> {
       }
       resolve({
         port: boundPort,
+        nodeServer: server,
         stop: () => {
           server.close();
           server.closeAllConnections();

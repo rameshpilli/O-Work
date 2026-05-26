@@ -40,9 +40,12 @@ function describeError(error: unknown) {
 export async function ensureDesktopLocalOpenworkConnection(
   options: EnsureDesktopLocalOpenworkOptions,
 ) {
-  const workspace = options.workspace;
+  const preferredWorkspace = options.workspace?.workspaceType === "local"
+    ? options.workspace
+    : options.allWorkspaces.find((item) => item.workspaceType === "local") ?? null;
+  const workspace = preferredWorkspace;
   const workspaceRoot = workspace?.path?.trim() ?? "";
-  if (!workspace || workspace.workspaceType !== "local" || !workspaceRoot) {
+  if (!workspace || !workspaceRoot) {
     return null;
   }
 
